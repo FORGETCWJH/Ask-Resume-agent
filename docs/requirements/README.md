@@ -12,3 +12,4 @@
 
 - [简历识别与确认](./resume-recognition.md)：从上传简历到 OCR、模块识别、人工修正、确认入库的完整需求。
 - [阶段一：OCR 简历提取与确认](./ocr-resume-extraction.md)：当前只实现本地解析、OCR、结构化草稿和人工确认，不调用 LLM。
+- [Agent 追问与项目参考答案](./agent-follow-up.md)：问题范围、问题版本、异步 LLM 任务、只读代码检索、参考答案和反馈闭环。

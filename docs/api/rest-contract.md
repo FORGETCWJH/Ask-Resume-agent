@@ -57,6 +57,86 @@
 
 `selection` 可以为 `null`。助手响应必须保留结构化 `questions`、`evidence`、`inferenceDrafts`、`evidenceGaps` 和 `feedback`。
 
+## Agent 追问与异步 LLM 任务
+
+Agent 追问使用独立的练习轮次和异步任务资源。旧的 `POST /conversations/{id}/messages` 保留为兼容接口；新的练习页面不得等待该接口同步完成模型调用。
+
+| 方法 | 路径 | 成功状态 | 说明 |
+|---|---|---:|---|
+| POST | `/conversations/{conversationId}/question-runs` | 202 | 根据结构化问题范围创建问题生成任务 |
+| GET | `/conversations/{conversationId}/practice-turns` | 200 | 获取练习轮次、问题版本、回答和结果状态 |
+| POST | `/practice-turns/{turnId}/answers` | 201 | 保存候选人回答，不调用 LLM |
+| POST | `/practice-turns/{turnId}/feedback-runs` | 202 | 创建回答反馈任务 |
+| POST | `/practice-turns/{turnId}/reference-answer-runs` | 202 | 创建项目代码参考答案任务 |
+| POST | `/practice-turns/{turnId}/follow-up-runs` | 202 | 创建下一条追问任务 |
+| GET | `/llm-runs/{runId}` | 200 | 查询异步任务状态和结构化结果 |
+| POST | `/llm-runs/{runId}/retry` | 202 | 保留旧任务并创建新的显式重试任务 |
+| POST | `/llm-runs/{runId}/cancel` | 202 | 取消排队任务或尽力取消运行中任务 |
+
+### 问题范围
+
+```json
+{
+  "scopeType": "resumeSection|project|selectedEvidence|customTopic",
+  "targetIds": ["uuid"],
+  "topic": "缓存一致性和失败处理",
+  "questionType": "implementation",
+  "difficulty": "medium"
+}
+```
+
+问题由模型生成，候选人不能直接编辑问题文本。相同范围默认复用当前问题；点击“换一个问题”才创建新问题版本。问题版本的指纹必须包含范围、材料版本、项目版本、提示版本和生成约束。
+
+### 异步任务响应
+
+创建问题、反馈、参考答案或追问任务时返回：
+
+```json
+{
+  "runId": "uuid",
+  "status": "queued",
+  "runType": "question|feedback|referenceAnswer|followUp",
+  "conversationId": "uuid",
+  "practiceTurnId": "uuid"
+}
+```
+
+任务状态为 `queued`、`running`、`succeeded`、`failed` 或 `cancelled`。网络错误和 5xx 由 Worker 有限重试，结构化校验失败最多执行一次 schema repair；业务失败需要候选人显式重试。
+
+### 练习轮次
+
+`POST /practice-turns/{turnId}/answers` 请求体：
+
+```json
+{ "content": "候选人的回答文本" }
+```
+
+参考答案只在候选人点击对应操作后生成，并绑定问题版本、项目档案版本和代码证据快照。参考答案返回：
+
+```json
+{
+  "answer": "基于当前项目代码可以确认的解释",
+  "evidenceLevel": "direct|inferred|insufficient",
+  "evidence": [
+    {
+      "path": "backend/app/service/example.py",
+      "startLine": 20,
+      "endLine": 42,
+      "quote": "..."
+    }
+  ],
+  "searchScope": ["backend/app/service"],
+  "limitations": ["当前范围未找到事务边界的直接实现"],
+  "genericExplanation": null
+}
+```
+
+没有明确绑定项目档案时，不自动跨项目猜测。代码证据不足时返回限制和已搜索范围，不生成项目事实；通用知识必须单独触发并与项目参考答案分区展示。
+
+### 幂等和权限
+
+服务端根据 `conversationId + action + inputFingerprint` 复用已有 `queued`、`running` 或 `succeeded` 任务。`runId` 不是访问凭据，查询任务时必须校验候选人、对话、材料集合和材料版本绑定。重试创建新的 `llmRun`，不覆盖旧任务。
+
 ## 简历识别
 
 `GET /materials/{materialId}/recognition` 返回：

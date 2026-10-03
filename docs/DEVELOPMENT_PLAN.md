@@ -4,7 +4,7 @@
 
 ## 当前执行切片
 
-当前只实现 PDF/DOCX 本地解析、图片型 PDF OCR、页级证据、本地规则结构化草稿和人工确认表单。上传、解析和确认过程不得调用 LLM；问题生成、对话、回答反馈、候选人补充、Redis/RabbitMQ、LangGraph 和 LangChain4j 均延期到后续阶段。执行顺序和进度以根目录 [PROCESS.md](../PROCESS.md) 为准。
+当前执行切片只实现 PDF/DOCX 本地解析、图片型 PDF OCR、页级证据、本地规则结构化草稿和人工确认表单。上传、解析和确认过程不得调用 LLM；问题生成、对话、回答反馈、候选人补充、Celery/Redis 和 LangGraph 延期到后续阶段。Agent 追问需求已经确认但尚未实现，完整边界见 [Agent 追问需求](requirements/agent-follow-up.md)。执行顺序和进度以根目录 [PROCESS.md](../PROCESS.md) 为准。
 
 当前识别草稿采用“完整描述优先”结构：技能掌握为一个 `content` 文本对象；工作/实习经历和项目经验按记录保留定位字段，但每条记录只有一个完整 `description`。历史拆分草稿通过 Alembic `0003_compact_resume_recognition`、`0004_clean_compact_resume_content` 迁移，阻止项目内容误入技能段并清理重复经历描述；原始 OCR 证据和已确认事实证据不被静默覆盖。
 
@@ -55,7 +55,9 @@ MVP 是一个面向 Python 后端候选人的本地单用户 Web 应用。应用
 | 文件存储 | 本地应用数据目录 | 原始文件和派生数据都在本地，删除范围清晰可审计。 |
 | 简历解析 | PyMuPDF 和 python-docx | 解析 PDF/DOCX 文本及 PDF 页码信息。 |
 | OCR | RapidOCR ONNX runtime 兜底 | OCR 在 Python 进程内运行，不需要单独部署托管服务。 |
-| LLM 集成 | 基于 OpenAI-compatible chat API 的提供商适配器 | 保持模型提供商可替换，API Key 只由服务端持有。 |
+| LLM 集成 | LangGraph + `langchain-core` + `langchain-openai` + Pydantic | LangGraph 编排短任务节点，`langchain-openai` 兼容现有 OpenAI-compatible 服务，API Key 只由服务端持有。 |
+| 异步任务 | Celery + Redis | 将问题、反馈、参考答案和追问变成可重试、可取消、可轮询的后台任务。 |
+| 代码检索 | 只读检索执行器 + `rg/grep` + Tree-sitter | 模型只生成结构化查询计划，执行器负责路径、文件和命令安全。 |
 | 测试 | pytest + FastAPI TestClient；前端使用 Vitest | 覆盖解析、API 契约、删除、上下文组装和关键 UI 状态。 |
 
 最小替代方案是只使用 FastAPI 和服务端渲染 HTML，不引入 React。它能减少初始化工作，但会让简历选中文本、上传进度和对话状态的演进变得困难。考虑到产品需要文档查看和交互式对话，推荐采用前后端分离的轻量方案。
@@ -69,9 +71,11 @@ MVP 是一个面向 Python 后端候选人的本地单用户 Web 应用。应用
         v
 FastAPI 应用
   |             |              |
-  |             |              +--> LLM 提供商适配器 --> 外部 LLM API
+  |             |              +--> Celery + Redis --> LangGraph Worker
+  |             |                                      |-> LLM 适配器 --> 外部模型
+  |             |                                      |-> 只读代码检索器
   |             |
-  |             +--> SQLite（元数据、对话、FTS5 证据索引）
+  |             +--> SQLite（元数据、对话、任务、FTS5 证据索引）
   |
   +--> 本地数据目录（原始文件、抽取文本、OCR 产物）
 ```
@@ -94,6 +98,11 @@ FastAPI 应用
 - `conversations`：材料版本 ID、标题、状态、滚动摘要及创建/更新时间。
 - `messages`：对话 ID、角色、文本、结构化响应 JSON、创建时间和模型元数据。
 - `candidate_supplements`：对话 ID、材料集合 ID、内容、证据缺口引用、确认状态和来源消息 ID。
+- `practice_turns`：一轮问题、回答、反馈、参考答案状态和轮次序号（Agent 阶段）。
+- `question_versions`：问题文本、结构化范围、输入指纹、材料/项目/提示版本（Agent 阶段）。
+- `reference_answers`：参考答案、证据等级、限制、代码快照和生成任务 ID（Agent 阶段）。
+- `code_evidence_snapshots`：项目版本、文件路径、行号、代码片段、检索范围和内容哈希（Agent 阶段）。
+- `llm_runs`：任务类型、节点、状态、输入指纹、耗时、结构化输出和错误摘要（Agent 阶段）。
 
 ### 关键不变量
 
@@ -103,6 +112,7 @@ FastAPI 应用
 - 证据引用必须能定位到现有证据块和源位置。
 - 未确认的候选人补充内容不能作为材料集合证据返回给其他对话。
 - 删除材料集合时，必须级联删除版本、对话、消息、补充内容、FTS 记录、抽取文件和原始文件。
+- 删除材料集合时，必须级联删除练习轮次、问题版本、参考答案、代码证据快照和 LLM 任务。
 
 ## 6. 处理流程
 
@@ -131,9 +141,9 @@ FastAPI 应用
 
 任何导入步骤都不能导入或执行项目代码。
 
-## 7. 直接 LLM 对话契约
+## 7. 兼容的直接 LLM 对话契约（旧版）
 
-每个用户动作触发一次直接 LLM 请求，不存在自主 Agent loop。
+现有直接消息接口作为兼容能力保留。Agent 追问阶段改用第 14 节定义的 LangGraph 异步任务，不在 HTTP 请求中等待模型，也不使用自主工具选择或隐藏 Agent loop。
 
 ### 上下文组装顺序
 
@@ -169,7 +179,7 @@ FastAPI 应用
 
 ### 对话模式
 
-- `generate_questions`：生成 5 到 10 个基于证据的问题，默认 8 个。
+- `generate_questions`：旧版兼容模式，可生成问题列表；Agent 追问阶段改为一次生成一条问题并保存问题版本。
 - `selected_passage_question`：回答或澄清一个关于选中简历段落的问题。
 - `answer_feedback`：从证据支持度、完整性、技术深度和表达清晰度评价候选人回答。
 - `clarification`：针对证据缺口提出定向补充问题。
@@ -192,6 +202,7 @@ FastAPI 应用
 - `GET /conversations/{id}`：返回摘要、消息和版本元数据。
 - `POST /conversations/{id}/messages`：针对指定模式执行一次直接 LLM 请求。
 - `PATCH /conversations/{id}/supplements/{supplementId}`：确认候选人补充内容。
+- Agent 追问阶段使用 `/question-runs`、`/practice-turns/{turnId}/answers`、`/feedback-runs`、`/reference-answer-runs`、`/follow-up-runs` 和 `/llm-runs/{runId}`，完整契约见 [REST API 契约](api/rest-contract.md) 和 [Agent 追问需求](requirements/agent-follow-up.md)。
 - `DELETE /material-sets/{id}`：返回 204，删除原始文件及全部派生记录。
 - `DELETE /materials/{materialId}`：返回 204，从当前版本移除单份材料，旧版本和旧对话保持可读。
 - `GET /health`：报告应用和数据库健康状态，不暴露密钥。
@@ -309,3 +320,36 @@ MVP 唯一需要的外部账号是 LLM 提供商账号。OCR 和文档解析在�
 ## 13. 最脆弱的前提
 
 本计划假设第一轮验证使用本地单用户 Web 应用即可。如果未来需要多用户、远程访问或云端持久化，则必须在对外暴露服务前，将 SQLite/本地文件和无认证边界替换为 PostgreSQL、对象存储和身份认证。
+
+## 14. 阶段 6：Agent 追问与项目参考答案（已确认，待实现）
+
+本阶段以 [Agent 追问与项目参考答案需求](requirements/agent-follow-up.md) 为唯一行为基准。目标是让候选人选择问题范围、回答模型生成的问题，并按需获得有代码证据支撑的参考答案和反馈。
+
+### 14.1 设计约束
+
+- 问题不局限于简历事实，但必须绑定候选人选择的问题范围、材料版本和已确认证据边界。
+- 问题由模型生成，候选人不能直接编辑；调整范围或点击“换一个问题”会创建新问题版本。
+- 保存回答不调用 LLM；只有生成问题、查看反馈、查看参考答案和继续追问四个显式操作创建 LLM 任务。
+- 参考答案必须绑定问题版本、项目档案版本和代码证据快照；输入指纹不变时直接复用，不重复生成。
+- 代码档案只允许安全的只读检索和静态解析；禁止执行、构建、测试、安装依赖和网络访问。
+- 业务数据库是唯一事实来源；LangGraph 只在 Worker 中执行一次用户动作，不在图内等待用户输入。
+
+### 14.2 顺序任务
+
+1. **领域模型与迁移**：新增 `practice_turns`、`question_versions`、`reference_answers`、`code_evidence_snapshots` 和 `llm_runs`，补齐材料版本、项目版本、问题指纹和级联删除约束。
+2. **异步任务基础设施**：增加 Celery + Redis 配置、任务状态机、幂等键、显式重试、取消和任务权限校验；Redis 不可用时返回稳定 Problem Details，不丢失候选人回答。
+3. **LangGraph 工作流**：实现问题生成、查询计划、参考答案、反馈和继续追问节点；每个节点使用 Pydantic 结构化输出，schema 修复最多一次。
+4. **只读代码检索器**：实现 ZIP 隔离目录、路径/符号链接防护、文件白名单、`rg/grep` 和 Tree-sitter 查询；查询计划必须经执行器校验，不执行模型生成命令。
+5. **问题与参考答案版本**：实现问题范围、问题版本、输入 fingerprint、参考答案快照、`direct/inferred/insufficient` 证据等级和通用知识分区。
+6. **REST API 与权限**：实现 `question-runs`、练习轮次回答、反馈任务、参考答案任务、继续追问、任务查询/重试/取消和轮次查询接口，全部返回 camelCase 和 Problem Details。
+7. **前端练习工作区**：增加问题范围选择、异步任务进度、单轮回答、反馈、参考答案、代码证据、限制说明、候选人补充确认、重试/取消和结束练习页面。
+8. **对话与删除链路**：只读取已确认事实和当前材料版本；材料集合删除时清理轮次、任务、问题版本、参考答案、代码快照和补充内容。
+9. **测试和文档门禁**：先写失败测试，再实现；同步 API、功能链路、架构、需求和验收文档；三层测试全部通过后才可标记阶段完成。
+
+### 14.3 阶段验收
+
+- 单元测试覆盖问题范围/fingerprint、任务状态、幂等、版本复用、证据等级和代码检索安全边界。
+- 集成测试覆盖 `202 + runId`、任务轮询、Worker Stub、保存回答不调用 LLM、参考答案版本隔离、失败重试和删除级联。
+- 端到端测试覆盖选择范围、生成问题、保存回答、查看反馈/参考答案/继续追问、重复查看复用、修改范围生成新版本、取消任务和结束练习。
+- 人工验收确认参考答案中的项目事实均可跳转到文件路径和行号；证据不足时不出现模型臆造的实现细节。
+- 任何一个必需测试层级失败，或 API/领域/功能链路文档未同步，阶段均视为未完成。
