@@ -123,3 +123,93 @@ class CandidateSupplement(Base):
     source_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class QuestionVersion(Base):
+    __tablename__ = "question_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    revision_id: Mapped[str] = mapped_column(ForeignKey("material_revisions.id", ondelete="CASCADE"), index=True)
+    scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    scope_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    questions_json: Mapped[str] = mapped_column(Text, default="[]")
+    prompt_version: Mapped[str] = mapped_column(String(40), default="question-v1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PracticeTurn(Base):
+    __tablename__ = "practice_turns"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    revision_id: Mapped[str] = mapped_column(ForeignKey("material_revisions.id", ondelete="CASCADE"), index=True)
+    question_version_id: Mapped[str] = mapped_column(ForeignKey("question_versions.id", ondelete="CASCADE"), index=True)
+    parent_turn_id: Mapped[str | None] = mapped_column(ForeignKey("practice_turns.id", ondelete="CASCADE"), nullable=True, index=True)
+    question_index: Mapped[int] = mapped_column(Integer, default=0)
+    question_text: Mapped[str] = mapped_column(Text)
+    question_json: Mapped[str] = mapped_column(Text, default="{}")
+    answer_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class PracticeAnswer(Base):
+    __tablename__ = "practice_answers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    turn_id: Mapped[str] = mapped_column(ForeignKey("practice_turns.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    content: Mapped[str] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PracticeFeedback(Base):
+    __tablename__ = "practice_feedback"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    turn_id: Mapped[str] = mapped_column(ForeignKey("practice_turns.id", ondelete="CASCADE"), index=True)
+    answer_id: Mapped[str] = mapped_column(ForeignKey("practice_answers.id", ondelete="CASCADE"), index=True)
+    prompt_version: Mapped[str] = mapped_column(String(40), default="feedback-v1")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CodeEvidenceSnapshot(Base):
+    __tablename__ = "code_evidence_snapshots"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    revision_id: Mapped[str] = mapped_column(ForeignKey("material_revisions.id", ondelete="CASCADE"), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ReferenceAnswer(Base):
+    __tablename__ = "reference_answers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    turn_id: Mapped[str] = mapped_column(ForeignKey("practice_turns.id", ondelete="CASCADE"), index=True)
+    question_version_id: Mapped[str] = mapped_column(ForeignKey("question_versions.id", ondelete="CASCADE"), index=True)
+    revision_id: Mapped[str] = mapped_column(ForeignKey("material_revisions.id", ondelete="CASCADE"), index=True)
+    question_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    code_snapshot_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    answer_json: Mapped[str] = mapped_column(Text, default="{}")
+    prompt_version: Mapped[str] = mapped_column(String(40), default="reference-v1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LlmRun(Base):
+    __tablename__ = "llm_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    turn_id: Mapped[str | None] = mapped_column(ForeignKey("practice_turns.id", ondelete="CASCADE"), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    request_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)

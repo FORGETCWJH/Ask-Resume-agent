@@ -15,6 +15,19 @@ async function waitForRecognition(materialId, timeoutMs = 15000) {
   throw new Error(`recognition timeout: ${JSON.stringify(lastBody ?? {})}`);
 }
 
+async function waitForRun(runId, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastBody;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${base}/api/v1/llm-runs/${runId}`);
+    if (response.status !== 200) throw new Error(`run status failed: ${response.status}`);
+    lastBody = await response.json();
+    if (["succeeded", "failed", "cancelled"].includes(lastBody.status)) return lastBody;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`run timeout: ${JSON.stringify(lastBody ?? {})}`);
+}
+
 function resumePdf() {
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
@@ -71,6 +84,19 @@ try {
   if (saved.status !== 200) throw new Error(`recognition save failed: ${saved.status}`);
   const confirmed = await fetch(`${base}/api/v1/materials/${resume.id}/recognition/confirm`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ section: "skills" }) });
   if (confirmed.status !== 200 || !(await confirmed.json()).confirmedSections.includes("skills")) throw new Error("recognition confirm failed");
+  const conversationCreate = await fetch(`${base}/api/v1/material-sets/${item.id}/conversations`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "端到端练习" }) });
+  if (conversationCreate.status !== 201) throw new Error(`conversation create failed: ${conversationCreate.status}`);
+  const conversation = await conversationCreate.json();
+  const questionRunResponse = await fetch(`${base}/api/v1/conversations/${conversation.id}/question-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ resumeSections: ["skills"], direction: "实现细节", count: 1 }) });
+  if (questionRunResponse.status !== 202) throw new Error(`question run failed: ${questionRunResponse.status}`);
+  const questionRun = await questionRunResponse.json();
+  const questionDone = await waitForRun(questionRun.runId);
+  if (questionDone.status !== "succeeded") throw new Error(`question run did not succeed: ${JSON.stringify(questionDone)}`);
+  const turnsResponse = await fetch(`${base}/api/v1/conversations/${conversation.id}/practice-turns`);
+  const turns = await turnsResponse.json();
+  if (!turns.items?.length) throw new Error("practice turns missing");
+  const answer = await fetch(`${base}/api/v1/practice-turns/${turns.items[0].id}/answers`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: "我负责了接口设计。" }) });
+  if (answer.status !== 201) throw new Error(`answer save failed: ${answer.status}`);
   const removed = await fetch(`${base}/api/v1/materials/${resume.id}`, { method: "DELETE" });
   if (removed.status !== 204) throw new Error(`single material delete failed: ${removed.status}`);
   const afterRemoval = await fetch(`${base}/api/v1/material-sets/${item.id}`);

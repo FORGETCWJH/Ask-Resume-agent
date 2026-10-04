@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 1
+    task_queue_backend: str = "local"
+    redis_url: str = "redis://127.0.0.1:6379/0"
     max_upload_bytes: int = 100 * 1024 * 1024
     host: str = "127.0.0.1"
     port: int = 8000

@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Check, ChevronRight, ExternalLink, FileArchive, FileSearch, FileText, FolderOpen, LayoutDashboard, LoaderCircle, Plus, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronRight, ExternalLink, FileArchive, FileSearch, FileText, FolderOpen, History, LayoutDashboard, LoaderCircle, MessageSquare, Plus, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { api } from "./api/client";
 import type { Evidence, Material, MaterialSet } from "./types/api";
 import { ResumeRecognitionPanel } from "./features/resume-recognition/ResumeRecognitionPanel";
+import { PracticePanel } from "./features/practice/PracticePanel";
 
-type View = "overview" | "materials" | "resume";
+type View = "overview" | "materials" | "resume" | "practice" | "history";
 const navigation: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "总览", icon: LayoutDashboard },
   { id: "materials", label: "材料库", icon: FolderOpen },
   { id: "resume", label: "简历确认", icon: FileText },
+  { id: "practice", label: "面试练习", icon: MessageSquare },
+  { id: "history", label: "对话历史", icon: History },
 ];
 
 function App() {
@@ -22,6 +25,7 @@ function App() {
   const [selectedEvidence, setSelectedEvidence] = useState<Evidence | null>(null);
   const [selectedResumeId, setSelectedResumeId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Material | null>(null);
+  const [practiceConversationId, setPracticeConversationId] = useState<string | null>(null);
 
   useEffect(() => {
     const handleHashChange = () => setView(viewFromHash());
@@ -113,6 +117,7 @@ function App() {
   function selectSet(id: string, nextView: View = "materials") {
     setSelectedId(id);
     setSelectedResumeId(null);
+    setPracticeConversationId(null);
     navigate(nextView);
     setSelectedEvidence(null);
   }
@@ -145,6 +150,8 @@ function App() {
             {view === "overview" && <Overview sets={sets} activeSet={activeSet} onCreate={() => setShowCreate(true)} onSelect={selectSet} />}
             {view === "materials" && <MaterialsView activeSet={activeSet} resume={resume} resumes={resumeMaterials} readyCount={readyCount} uploadPending={upload.isPending} onUpload={(file) => upload.mutate(file)} evidence={evidenceQuery.data ?? []} onEvidence={openEvidence} onResume={(id) => { setSelectedResumeId(id); navigate("resume"); }} onDelete={setPendingDelete} onRetry={(id) => retryMaterial.mutate(id)} />}
             {view === "resume" && <ResumeView resumeId={resume?.id} resumes={resumeMaterials} onSelectResume={setSelectedResumeId} evidence={evidenceQuery.data ?? []} onEvidence={openEvidence} onGoMaterials={() => navigate("materials")} />}
+            {view === "practice" && <PracticePanel materialSetId={activeSet?.id} projects={activeSet?.materials.filter((item) => item.kind === "project_archive") ?? []} conversationId={practiceConversationId} onConversationId={setPracticeConversationId} />}
+            {view === "history" && <ConversationHistoryView materialSetId={activeSet?.id} onOpen={(id) => { setPracticeConversationId(id); navigate("practice"); }} />}
           </div>
           {selectedEvidence && <EvidencePanel evidence={selectedEvidence} onClose={() => setSelectedEvidence(null)} />}
         </div>
@@ -156,7 +163,14 @@ function App() {
 
 function viewFromHash(): View {
   const value = window.location.hash.replace(/^#\//, "");
-  return value === "materials" || value === "resume" ? value : "overview";
+  return value === "materials" || value === "resume" || value === "practice" || value === "history" ? value : "overview";
+}
+
+function ConversationHistoryView({ materialSetId, onOpen }: { materialSetId?: string; onOpen: (id: string) => void }) {
+  const query = useQuery({ queryKey: ["practice-conversations", materialSetId], queryFn: () => api<Array<{ id: string; title: string; summary: string; updatedAt: string }>>(`/api/v1/material-sets/${materialSetId}/conversations`), enabled: Boolean(materialSetId) });
+  const items = query.data ?? [];
+  if (!materialSetId) return <EmptyPage title="先选择材料集合" action="选择材料集合后查看对话历史" />;
+  return <section className="page-stack"><div className="page-heading compact-heading"><div><span className="eyebrow">CONVERSATION HISTORY</span><h2>对话历史</h2><p>每个对话绑定创建时的材料版本，材料更新不会改写历史练习。</p></div></div><div className="conversation-history-list">{items.map((item) => <button key={item.id} className="history-card" onClick={() => onOpen(item.id)}><MessageSquare size={17} /><span><b>{item.title}</b><small>{item.summary || "还没有练习摘要"}</small></span><ChevronRight size={16} /></button>)}{!items.length && <div className="empty-panel large-empty">还没有历史对话。</div>}</div></section>;
 }
 
 function Overview({ sets, activeSet, onCreate, onSelect }: { sets: MaterialSet[]; activeSet?: MaterialSet; onCreate: () => void; onSelect: (id: string, view?: View) => void }) {

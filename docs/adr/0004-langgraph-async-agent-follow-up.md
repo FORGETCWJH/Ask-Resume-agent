@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受，待实现
+已接受，阶段六已实现非代码证据链路
 
 ## 背景
 
@@ -11,7 +11,7 @@
 ## 决策
 
 1. 使用 LangGraph 编排问题、代码查询计划、参考答案、反馈和继续追问节点。
-2. 使用 `langchain-openai` 通过 `base_url` 调用现有 OpenAI-compatible 模型，使用 Pydantic 校验结构化输出。
+2. 使用 `langchain-openai` 的 `ChatOpenAI` 通过 `base_url` 调用现有 OpenAI-compatible 模型，使用 `json_mode + Pydantic` 校验结构化输出；应用层不直接使用手写 `httpx` 请求。
 3. 使用 Celery + Redis 执行异步 LLM 任务；每个用户动作创建一个 `llmRun`，接口返回 `202 + runId`。
 4. 业务数据库是对话、练习轮次、问题版本、参考答案和代码证据快照的唯一事实来源；LangGraph 不保存独立的长期业务状态。
 5. 模型只能生成结构化查询计划，代码检索执行器负责路径、文件大小、目录排除和命令安全；只允许 `rg/grep`、白名单文件读取和 Tree-sitter 静态解析。
@@ -19,7 +19,7 @@
 
 ## 取舍
 
-该方案引入 Redis、Celery 和 LangGraph，部署复杂度高于单次 `httpx` 请求，但能支持长链路任务、显式用户触发、失败重试、取消、幂等和节点扩展。代码执行器与模型节点分离，牺牲了一些自动化灵活性，换取上传代码的安全边界和证据可追溯性。
+该方案引入 Redis、Celery、LangGraph 和 LangChain，部署复杂度高于单次请求，但能支持长链路任务、显式用户触发、失败重试、取消、幂等和节点扩展。代码证据当前使用空 Provider；未来替换 Provider 时不改变练习接口。
 
 ## 约束
 
