@@ -10,10 +10,10 @@ MVP 需要直接向外部模型发起对话，但不同供应商对 Base URL、�
 
 ## 决策
 
-后端使用 `httpx` 调用 OpenAI-compatible `POST /chat/completions`，并通过环境变量配置模型标识、响应格式、鉴权模式、输出上限、温度、超时和重试次数。
+后端使用 `langchain-openai` 的 `ChatOpenAI` 调用 OpenAI-compatible 服务，并通过环境变量配置 base URL、模型标识、鉴权、输出上限、温度、超时和重试次数。应用层不直接创建 `httpx.AsyncClient`。
 
-默认使用 `Authorization: Bearer <key>` 和 `response_format: {"type":"json_object"}`。只对网络错误、429 和 5xx 做有限重试；测试套件自动关闭外部模型调用并使用演示响应。
+默认使用 `json_mode + Pydantic` 校验结构化结果。适配器只处理同一次调用的技术性错误，任务层负责显式重试；测试套件自动关闭外部模型调用并使用 Fake LLM 响应。
 
 ## 取舍
 
-这保留了供应商可替换性，也便于验证结构化响应；代价是无法利用某个供应商的专有 SDK 能力。MVP 暂不接入工具调用、流式输出或供应商专属 Responses API。
+这保留了供应商可替换性，也便于统一结构化响应和 LangGraph 节点；代价是增加 LangChain 依赖。MVP 暂不接入工具调用、流式输出或供应商专属 Responses API。

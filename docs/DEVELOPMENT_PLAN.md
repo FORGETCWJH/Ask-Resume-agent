@@ -4,7 +4,7 @@
 
 ## 当前执行切片
 
-当前执行切片只实现 PDF/DOCX 本地解析、图片型 PDF OCR、页级证据、本地规则结构化草稿和人工确认表单。上传、解析和确认过程不得调用 LLM；问题生成、对话、回答反馈、候选人补充、Celery/Redis 和 LangGraph 延期到后续阶段。Agent 追问需求已经确认但尚未实现，完整边界见 [Agent 追问需求](requirements/agent-follow-up.md)。执行顺序和进度以根目录 [PROCESS.md](../PROCESS.md) 为准。
+OCR 阶段已实现 PDF/DOCX 本地解析、图片型 PDF OCR、页级证据、本地规则结构化草稿和人工确认表单。当前执行切片继续实现 Agent 追问的第一条异步链路；上传、解析和确认过程仍不得调用 LLM。完整边界见 [Agent 追问需求](requirements/agent-follow-up.md)，执行顺序和进度以根目录 [PROCESS.md](../PROCESS.md) 为准。
 
 当前识别草稿采用“完整描述优先”结构：技能掌握为一个 `content` 文本对象；工作/实习经历和项目经验按记录保留定位字段，但每条记录只有一个完整 `description`。历史拆分草稿通过 Alembic `0003_compact_resume_recognition`、`0004_clean_compact_resume_content` 迁移，阻止项目内容误入技能段并清理重复经历描述；原始 OCR 证据和已确认事实证据不被静默覆盖。
 
@@ -321,7 +321,7 @@ MVP 唯一需要的外部账号是 LLM 提供商账号。OCR 和文档解析在�
 
 本计划假设第一轮验证使用本地单用户 Web 应用即可。如果未来需要多用户、远程访问或云端持久化，则必须在对外暴露服务前，将 SQLite/本地文件和无认证边界替换为 PostgreSQL、对象存储和身份认证。
 
-## 14. 阶段 6：Agent 追问与项目参考答案（已确认，待实现）
+## 14. 阶段 5：Agent 追问与项目参考答案（第一条实现切片已完成）
 
 本阶段以 [Agent 追问与项目参考答案需求](requirements/agent-follow-up.md) 为唯一行为基准。目标是让候选人选择问题范围、回答模型生成的问题，并按需获得有代码证据支撑的参考答案和反馈。
 
@@ -336,13 +336,13 @@ MVP 唯一需要的外部账号是 LLM 提供商账号。OCR 和文档解析在�
 
 ### 14.2 顺序任务
 
-1. **领域模型与迁移**：新增 `practice_turns`、`question_versions`、`reference_answers`、`code_evidence_snapshots` 和 `llm_runs`，补齐材料版本、项目版本、问题指纹和级联删除约束。
-2. **异步任务基础设施**：增加 Celery + Redis 配置、任务状态机、幂等键、显式重试、取消和任务权限校验；Redis 不可用时返回稳定 Problem Details，不丢失候选人回答。
-3. **LangGraph 工作流**：实现问题生成、查询计划、参考答案、反馈和继续追问节点；每个节点使用 Pydantic 结构化输出，schema 修复最多一次。
-4. **只读代码检索器**：实现 ZIP 隔离目录、路径/符号链接防护、文件白名单、`rg/grep` 和 Tree-sitter 查询；查询计划必须经执行器校验，不执行模型生成命令。
-5. **问题与参考答案版本**：实现问题范围、问题版本、输入 fingerprint、参考答案快照、`direct/inferred/insufficient` 证据等级和通用知识分区。
+1. **领域模型与迁移**：已新增 `practice_turns`、`question_versions`、`practice_answers`、`practice_feedback`、`reference_answers`、`code_evidence_snapshots` 和 `llm_runs`；阶段六使用 Alembic `0005_agent_final_practice` 保存回答版本、反馈和追问父子关系。
+2. **异步任务基础设施**：已增加本地队列适配器、Celery/Redis 配置入口、状态机、显式重试和取消接口；Docker Redis 7 + Celery worker 已完成真实消费验收，并覆盖队列不可用 Problem Details。
+3. **LangGraph 与 LangChain 工作流**：问题、反馈、参考答案和继续追问分别使用带业务节点名称的短图；所有真实模型调用经 `LLMClient -> LangChainOpenAIAdapter -> ChatOpenAI`，结构化响应使用 `json_mode + Pydantic`，不在图内等待候选人输入。
+4. **只读代码检索器**：已实现隔离目录、路径白名单、排除目录、文本文件读取和行号证据；查询计划的关键词、路径、命令注入、文件数和读取上限均由安全校验器约束。
+5. **问题与参考答案版本**：实现完整问题范围、问题版本、回答版本、反馈持久化、输入 fingerprint 和 `insufficient` 空代码证据降级；用户修改回答不改写同一问题版本下的参考答案。
 6. **REST API 与权限**：实现 `question-runs`、练习轮次回答、反馈任务、参考答案任务、继续追问、任务查询/重试/取消和轮次查询接口，全部返回 camelCase 和 Problem Details。
-7. **前端练习工作区**：增加问题范围选择、异步任务进度、单轮回答、反馈、参考答案、代码证据、限制说明、候选人补充确认、重试/取消和结束练习页面。
+7. **前端练习工作区**：已增加问题范围选择、类型/难度/主题、可恢复多对话、异步任务进度、回答版本、反馈、参考答案和继续追问按钮；页面明确展示代码证据暂未启用。
 8. **对话与删除链路**：只读取已确认事实和当前材料版本；材料集合删除时清理轮次、任务、问题版本、参考答案、代码快照和补充内容。
 9. **测试和文档门禁**：先写失败测试，再实现；同步 API、功能链路、架构、需求和验收文档；三层测试全部通过后才可标记阶段完成。
 
@@ -350,6 +350,19 @@ MVP 唯一需要的外部账号是 LLM 提供商账号。OCR 和文档解析在�
 
 - 单元测试覆盖问题范围/fingerprint、任务状态、幂等、版本复用、证据等级和代码检索安全边界。
 - 集成测试覆盖 `202 + runId`、任务轮询、Worker Stub、保存回答不调用 LLM、参考答案版本隔离、失败重试和删除级联。
-- 端到端测试覆盖选择范围、生成问题、保存回答、查看反馈/参考答案/继续追问、重复查看复用、修改范围生成新版本、取消任务和结束练习。
+- 端到端测试覆盖选择范围、生成问题、保存回答、查看反馈/参考答案/继续追问、重复查看复用、修改范围生成新版本、取消任务和结束练习；当前自动化烟测已覆盖生成问题、回答保存和删除链路，反馈/继续追问由后端集成测试覆盖。
 - 人工验收确认参考答案中的项目事实均可跳转到文件路径和行号；证据不足时不出现模型臆造的实现细节。
 - 任何一个必需测试层级失败，或 API/领域/功能链路文档未同步，阶段均视为未完成。
+
+## 15. 阶段 6：非代码证据最终版（已完成）
+
+本阶段落实已确认的最终交互和 Agent 运行语义。代码证据暂时由空 Provider 代替，不计入本阶段完成标准。
+
+- 使用 LangChain OpenAI 适配器替代应用层手写 `httpx` 请求。
+- 为问题生成、反馈、参考答案和继续追问使用独立结构化响应模型和 LangGraph 节点。
+- 回答保存创建不可变回答版本，反馈绑定回答版本，参考答案绑定问题版本且不会因回答修改而覆盖。
+- 任务重试创建新的 `llmRun`，取消后的 Worker 不得写回成功。
+- 前端支持问题类型、难度、自定义主题、多对话切换、刷新恢复和新问题版本。
+- 代码证据返回 `insufficient` 和明确限制，不生成项目事实。
+
+阶段验收结果：`pytest backend/tests/unit -q`（40 passed）、`pytest backend/tests/integration -q`（17 passed）、`cd frontend; npm run build`（成功）、`cd frontend; npm run test:e2e`（通过）和 `alembic upgrade head`（成功）全部通过，并已同步更新 `PROCESS.md`。真实代码证据 Provider 仍按已确认范围暂缓，当前参考答案明确返回 `insufficient`。

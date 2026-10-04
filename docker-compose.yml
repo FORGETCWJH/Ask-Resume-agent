@@ -1,0 +1,12 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ask-resume-agent-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - resume-redis-data:/data
+
+volumes:
+  resume-redis-data:

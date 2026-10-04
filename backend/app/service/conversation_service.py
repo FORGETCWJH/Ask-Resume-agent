@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from ..common.errors import AppError, not_found
 from ..dto.conversation import ConversationOut, MessageOut, SupplementOut
 from ..domain.resume_recognition import redact_personal_context
-from ..models import CandidateSupplement, Conversation, EvidenceChunk, Material, MaterialRevision, Message, ResumeExtractionDraft
+from ..models import CandidateSupplement, Conversation, EvidenceChunk, Material, MaterialRevision, Message, MaterialSet, ResumeExtractionDraft
 from ..repository.conversation_repository import ConversationRepository
 from ..infrastructure.llm import LLMError, request_llm
 
@@ -30,6 +30,14 @@ class ConversationService:
         self.db.commit()
         self.db.refresh(conversation)
         return self.serialize(conversation)
+
+    def list_for_set(self, set_id: str) -> list[ConversationOut]:
+        material_set = self.db.get(MaterialSet, set_id)
+        if not material_set:
+            raise not_found("MATERIAL_SET_NOT_FOUND", "材料集合不存在")
+        revisions = self.db.query(MaterialRevision.id).filter(MaterialRevision.material_set_id == set_id).subquery()
+        rows = self.db.query(Conversation).filter(Conversation.revision_id.in_(revisions)).order_by(Conversation.updated_at.desc()).all()
+        return [self.serialize(row) for row in rows]
 
     def serialize(self, conversation: Conversation) -> ConversationOut:
         messages = [MessageOut(id=m.id, role=m.role, content=m.text, mode=m.mode, response=json.loads(m.response_json) if m.response_json else None, created_at=m.created_at) for m in self.repo.messages(conversation.id)]

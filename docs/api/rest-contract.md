@@ -14,6 +14,7 @@
 | POST | `/material-sets/{id}/materials` | 202 | 上传 `kind=resume\|projectArchive` 的材料 |
 | GET | `/material-sets/{id}/materials` | 200 | 列出材料状态 |
 | GET | `/material-sets/{id}/evidence` | 200 | 查询证据 |
+| GET | `/material-sets/{id}/conversations` | 200 | 查询材料集合下的历史对话 |
 | DELETE | `/materials/{materialId}` | 204 | 从当前版本移除单份材料，保留历史版本 |
 | POST | `/materials/{materialId}/retry` | 200 | 重试项目档案静态解析 |
 | GET | `/materials/{materialId}/recognition` | 200 | 获取简历结构化识别草稿和状态 |
@@ -55,7 +56,7 @@
 }
 ```
 
-`selection` 可以为 `null`。助手响应必须保留结构化 `questions`、`evidence`、`inferenceDrafts`、`evidenceGaps` 和 `feedback`。
+`selection` 可以为 `null`。助手响应必须保留结构化 `questions`、`evidence`、`inferenceDrafts`、`evidenceGaps` 和 `feedback`；数组元素必须是对象。兼容层会将供应商返回的简单字符串元素归一化为 `{text: "..."}`，但无法推断的字段不会伪造额外事实。
 
 ## Agent 追问与异步 LLM 任务
 
@@ -65,7 +66,7 @@ Agent 追问使用独立的练习轮次和异步任务资源。旧的 `POST /con
 |---|---|---:|---|
 | POST | `/conversations/{conversationId}/question-runs` | 202 | 根据结构化问题范围创建问题生成任务 |
 | GET | `/conversations/{conversationId}/practice-turns` | 200 | 获取练习轮次、问题版本、回答和结果状态 |
-| POST | `/practice-turns/{turnId}/answers` | 201 | 保存候选人回答，不调用 LLM |
+| POST | `/practice-turns/{turnId}/answers` | 201 | 保存一个候选人回答版本，不调用 LLM |
 | POST | `/practice-turns/{turnId}/feedback-runs` | 202 | 创建回答反馈任务 |
 | POST | `/practice-turns/{turnId}/reference-answer-runs` | 202 | 创建项目代码参考答案任务 |
 | POST | `/practice-turns/{turnId}/follow-up-runs` | 202 | 创建下一条追问任务 |
@@ -101,7 +102,9 @@ Agent 追问使用独立的练习轮次和异步任务资源。旧的 `POST /con
 }
 ```
 
-任务状态为 `queued`、`running`、`succeeded`、`failed` 或 `cancelled`。网络错误和 5xx 由 Worker 有限重试，结构化校验失败最多执行一次 schema repair；业务失败需要候选人显式重试。
+任务状态为 `queued`、`running`、`succeeded`、`failed` 或 `cancelled`。网络错误和 5xx 由 Worker 有限重试；供应商返回的简单字符串字段会先归一化为结构化对象，无法归一化的结构化错误直接失败并需要候选人显式重试。
+
+当前实现返回最小任务响应 `{runId, status}`，任务结果通过 `GET /llm-runs/{runId}` 查询。默认 `TASK_QUEUE_BACKEND=local` 使用进程内短任务 worker；部署 Redis 后设置 `TASK_QUEUE_BACKEND=celery`，由 `backend/app/agent_worker.py` 的 Celery worker 消费。每次显式重试创建新 `runId`，取消后的 Worker 不得写回成功。所有真实模型调用经 `LangChainOpenAIAdapter`，HTTP 请求不会等待模型结果。
 
 ### 练习轮次
 
@@ -111,7 +114,7 @@ Agent 追问使用独立的练习轮次和异步任务资源。旧的 `POST /con
 { "content": "候选人的回答文本" }
 ```
 
-参考答案只在候选人点击对应操作后生成，并绑定问题版本、项目档案版本和代码证据快照。参考答案返回：
+参考答案只在候选人提交回答并点击对应操作后生成，并绑定问题版本和代码证据快照。当前代码证据功能关闭时返回 `insufficient` 和限制说明；参考答案不可因用户修改回答而覆盖。
 
 ```json
 {

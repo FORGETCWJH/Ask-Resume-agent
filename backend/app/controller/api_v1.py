@@ -5,10 +5,13 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..dto.base import ApiModel
 from ..dto.conversation import ConversationCreate, ConversationOut, MessageCreate, MessageOut, QuestionBatchOut, SupplementOut, SupplementUpdate
+from ..dto.agent_follow_up import LlmRunCreateOut, LlmRunOut, PracticeAnswerCreate, PracticeAnswerOut, PracticeTurnListOut, QuestionScope
 from ..dto.material import EvidenceOut, MaterialSetCreate, MaterialSetOut, MaterialSummary, RecognitionConfirm, RecognitionOut, RecognitionPatch, RecognitionRetry
 from ..service.conversation_service import ConversationService
 from ..service.material_service import MaterialService
 from ..service.resume_recognition_service import ResumeRecognitionService
+from ..service.agent_follow_up_service import AgentFollowUpService
+from ..models import LlmRun
 
 
 router = APIRouter(prefix="/api/v1")
@@ -101,6 +104,11 @@ def create_conversation(set_id: str, payload: ConversationCreate, db: Session = 
     return ConversationService(db).create(set_id, payload.title)
 
 
+@router.get("/material-sets/{set_id}/conversations", response_model=list[ConversationOut])
+def list_conversations(set_id: str, db: Session = Depends(get_db)) -> list[ConversationOut]:
+    return ConversationService(db).list_for_set(set_id)
+
+
 @router.post("/material-sets/{set_id}/question-batches", response_model=QuestionBatchOut, status_code=status.HTTP_201_CREATED)
 async def generate_question_batch(set_id: str, db: Session = Depends(get_db)) -> QuestionBatchOut:
     service = ConversationService(db)
@@ -125,3 +133,54 @@ async def send_message(conversation_id: str, payload: MessageCreate, db: Session
 @router.patch("/conversations/{conversation_id}/supplements/{supplement_id}", response_model=SupplementOut)
 def confirm_supplement(conversation_id: str, supplement_id: str, payload: SupplementUpdate, db: Session = Depends(get_db)) -> SupplementOut:
     return ConversationService(db).confirm_supplement(conversation_id, supplement_id, payload.content)
+
+
+@router.post("/conversations/{conversation_id}/question-runs", response_model=LlmRunCreateOut, status_code=status.HTTP_202_ACCEPTED)
+def create_question_run(conversation_id: str, payload: QuestionScope, db: Session = Depends(get_db)) -> LlmRunCreateOut:
+    run = AgentFollowUpService(db).create_question_run(conversation_id, payload)
+    return LlmRunCreateOut(run_id=run.id, status=run.status, run_type=run.kind, conversation_id=run.conversation_id, practice_turn_id=run.practice_turn_id)
+
+
+@router.get("/conversations/{conversation_id}/practice-turns", response_model=PracticeTurnListOut)
+def list_practice_turns(conversation_id: str, db: Session = Depends(get_db)) -> PracticeTurnListOut:
+    return AgentFollowUpService(db).list_turns(conversation_id)
+
+
+@router.post("/practice-turns/{turn_id}/answers", response_model=PracticeAnswerOut, status_code=status.HTTP_201_CREATED)
+def save_practice_answer(turn_id: str, payload: PracticeAnswerCreate, db: Session = Depends(get_db)) -> PracticeAnswerOut:
+    return AgentFollowUpService(db).save_answer(turn_id, payload.content)
+
+
+@router.post("/practice-turns/{turn_id}/reference-answer-runs", response_model=LlmRunCreateOut, status_code=status.HTTP_202_ACCEPTED)
+def create_reference_answer_run(turn_id: str, db: Session = Depends(get_db)) -> LlmRunCreateOut:
+    run = AgentFollowUpService(db).create_reference_run(turn_id)
+    return LlmRunCreateOut(run_id=run.id, status=run.status, run_type=run.kind, conversation_id=run.conversation_id, practice_turn_id=run.practice_turn_id)
+
+
+@router.post("/practice-turns/{turn_id}/feedback-runs", response_model=LlmRunCreateOut, status_code=status.HTTP_202_ACCEPTED)
+def create_feedback_run(turn_id: str, db: Session = Depends(get_db)) -> LlmRunCreateOut:
+    run = AgentFollowUpService(db).create_feedback_run(turn_id)
+    return LlmRunCreateOut(run_id=run.id, status=run.status, run_type=run.kind, conversation_id=run.conversation_id, practice_turn_id=run.practice_turn_id)
+
+
+@router.post("/practice-turns/{turn_id}/follow-up-runs", response_model=LlmRunCreateOut, status_code=status.HTTP_202_ACCEPTED)
+def create_follow_up_run(turn_id: str, db: Session = Depends(get_db)) -> LlmRunCreateOut:
+    run = AgentFollowUpService(db).create_follow_up_run(turn_id)
+    return LlmRunCreateOut(run_id=run.id, status=run.status, run_type=run.kind, conversation_id=run.conversation_id, practice_turn_id=run.practice_turn_id)
+
+
+@router.get("/llm-runs/{run_id}", response_model=LlmRunOut)
+def get_llm_run(run_id: str, db: Session = Depends(get_db)) -> LlmRunOut:
+    return AgentFollowUpService(db).get_run(run_id)
+
+
+@router.post("/llm-runs/{run_id}/retry", response_model=LlmRunCreateOut, status_code=status.HTTP_202_ACCEPTED)
+def retry_llm_run(run_id: str, db: Session = Depends(get_db)) -> LlmRunCreateOut:
+    service = AgentFollowUpService(db)
+    run = service.retry_run(run_id)
+    return LlmRunCreateOut(run_id=run.id, status=run.status, run_type=run.kind, conversation_id=run.conversation_id, practice_turn_id=run.practice_turn_id)
+
+
+@router.post("/llm-runs/{run_id}/cancel", response_model=LlmRunOut)
+def cancel_llm_run(run_id: str, db: Session = Depends(get_db)) -> LlmRunOut:
+    return AgentFollowUpService(db).cancel_run(run_id)
