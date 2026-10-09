@@ -94,6 +94,9 @@ class MaterialService:
             placeholders = ",".join(f":id{i}" for i in range(len(evidence_ids)))
             self.db.execute(text(f"DELETE FROM evidence_fts WHERE evidence_id IN ({placeholders})"), params)
         self.db.delete(item)
+        self.db.flush()
+        from ..repository.practice_repository import PracticeRepository
+        PracticeRepository(self.db).delete_orphan_preferences()
         self.db.commit()
         self.storage.delete_material_set(set_id)
 

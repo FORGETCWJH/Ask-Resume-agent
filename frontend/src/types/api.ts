@@ -15,7 +15,14 @@ export type Conversation = { id: string; revisionId: string; title: string; summ
 export type QuestionScope = { projectIds: string[]; resumeSections: string[]; selectedText?: string; scopeType?: string; targetIds?: string[]; topic?: string; questionType?: string; difficulty?: string; direction?: string; count: number; newVersion?: boolean };
 export type LlmRun = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; kind: string; result?: Record<string, unknown> | null; error?: string | null; createdAt: string; updatedAt: string };
 export type PracticeTurn = { id: string; question: string; questionData: Record<string, unknown>; answer?: string | null; answerId?: string | null; answerVersion?: number | null; parentTurnId?: string | null; feedback?: { summary?: string; strengths?: string[]; missingPoints?: string[]; evidenceGaps?: unknown[]; nextPracticeStep?: string } | null; referenceAnswer?: { answer?: string; evidenceGrade?: string; limitations?: string[]; codeEvidence?: { path: string; lineStart: number; lineEnd: number; snippet: string }[]; genericExplanation?: string | null } | null; createdAt: string; updatedAt: string };
-export type PracticeConversation = { id: string; revisionId: string; title: string; summary: string; createdAt: string; updatedAt: string };
+export type PracticeConversation = { id: string; revisionId: string; groupId?: string | null; title: string; summary: string; createdAt: string; updatedAt: string; isPinned: boolean; pinnedAt?: string | null; isArchived: boolean; archivedAt?: string | null; lastActivityAt: string };
+export type ConversationGroup = { id: string; materialSetId: string; name: string; createdAt: string; updatedAt: string };
+
+export type PracticeState = { mainTurnIds: string[]; currentIndex: number; currentTurnId: string | null; questionVersionId?: string; completed: boolean; clarification: string | null; activeRunId: string | null; lastRunId?: string };
+export type PracticeMessage = { id: string; sequence: number; role: string; messageType: string; content: string; runId: string | null; practiceTurnId: string | null; answerVersionId: string | null; answerVersion?: number; result?: { limitations?: string[]; strengths?: string[]; missingPoints?: string[]; nextPracticeStep?: string }; createdAt: string };
+export type PracticePreference = { id: string; key: string; value: string | number; revision: number; sourceConversationIds: string[] };
+export type ResumeSnapshot = { materialId: string; filename: string; snapshotStatus: string; confirmedSections: RecognitionSection[]; sections: Partial<RecognitionDraft>; evidence: { id: string; content: string; pageNumber?: number; sourcePath?: string }[] };
+export type ResumeSnapshots = { conversationId: string; revisionId: string; snapshotStatus?: string; resumes: ResumeSnapshot[] };
 
 export type RecognitionSection = "personalInfo" | "skills" | "workExperiences" | "projects";
 export type PersonalInfoDraft = { name: string; phone: string; email: string; city: string; targetRole: string; links: string[]; evidenceIds?: string[]; confidence?: number };

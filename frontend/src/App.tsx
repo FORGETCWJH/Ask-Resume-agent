@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Check, ChevronRight, ExternalLink, FileArchive, FileSearch, FileText, FolderOpen, History, LayoutDashboard, LoaderCircle, MessageSquare, Plus, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { api } from "./api/client";
+import { practiceApi } from "./api/practice";
 import type { Evidence, Material, MaterialSet } from "./types/api";
 import { ResumeRecognitionPanel } from "./features/resume-recognition/ResumeRecognitionPanel";
 import { PracticePanel } from "./features/practice/PracticePanel";
+import { ConversationHistory } from "./features/history/ConversationHistory";
 
 type View = "overview" | "materials" | "resume" | "practice" | "history";
 const navigation: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
@@ -17,7 +19,7 @@ const navigation: { id: View; label: string; icon: typeof LayoutDashboard }[] = 
 
 function App() {
   const client = useQueryClient();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => localStorage.getItem("active-material-set"));
   const [view, setView] = useState<View>(() => viewFromHash());
   const [showCreate, setShowCreate] = useState(false);
   const [newTitle, setNewTitle] = useState("Python 后端简历");
@@ -45,6 +47,7 @@ function App() {
   });
   const sets = setsQuery.data ?? [];
   const activeSet = sets.find((item) => item.id === selectedId) ?? sets[0];
+  useEffect(() => { if (activeSet) localStorage.setItem("active-material-set", activeSet.id); }, [activeSet?.id]);
   const resumeMaterials = activeSet?.materials.filter((item) => item.kind === "resume") ?? [];
   const resume = resumeMaterials.find((item) => item.id === selectedResumeId) ?? [...resumeMaterials].reverse()[0];
   const readyCount = useMemo(() => activeSet?.materials.filter((item) => item.status === "ready").length ?? 0, [activeSet]);
@@ -81,8 +84,17 @@ function App() {
   });
 
   const removeSet = useMutation({
-    mutationFn: () => activeSet ? api(`/api/v1/material-sets/${activeSet.id}`, { method: "DELETE" }) : Promise.resolve(null),
-    onSuccess: () => {
+    mutationFn: async () => {
+      if (!activeSet) return [];
+      const conversations = await practiceApi.conversations(activeSet.id);
+      await api(`/api/v1/material-sets/${activeSet.id}`, { method: "DELETE" });
+      return conversations.map(c => c.id);
+    },
+    onSuccess: (conversationIds) => {
+      for (const id of conversationIds) localStorage.removeItem(`practice-draft:${id}`);
+      if (activeSet) { localStorage.removeItem(`practice-conversation:${activeSet.id}`); localStorage.removeItem(`practice-draft:${activeSet.id}`); }
+      localStorage.removeItem("active-material-set");
+      client.clear();
       setSelectedId(null);
       navigate("overview");
       setSelectedEvidence(null);
@@ -126,6 +138,8 @@ function App() {
     setSelectedEvidence(evidence);
   }
 
+  if (view === "practice") return <main className="practice-app"><PracticePanel materialSetId={activeSet?.id} materialSets={sets} conversationId={practiceConversationId} onConversationId={setPracticeConversationId} onMaterials={() => navigate("materials")} onSelectSet={id => selectSet(id, "practice")} onEditResume={() => navigate("resume")} /></main>;
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -150,7 +164,6 @@ function App() {
             {view === "overview" && <Overview sets={sets} activeSet={activeSet} onCreate={() => setShowCreate(true)} onSelect={selectSet} />}
             {view === "materials" && <MaterialsView activeSet={activeSet} resume={resume} resumes={resumeMaterials} readyCount={readyCount} uploadPending={upload.isPending} onUpload={(file) => upload.mutate(file)} evidence={evidenceQuery.data ?? []} onEvidence={openEvidence} onResume={(id) => { setSelectedResumeId(id); navigate("resume"); }} onDelete={setPendingDelete} onRetry={(id) => retryMaterial.mutate(id)} />}
             {view === "resume" && <ResumeView resumeId={resume?.id} resumes={resumeMaterials} onSelectResume={setSelectedResumeId} evidence={evidenceQuery.data ?? []} onEvidence={openEvidence} onGoMaterials={() => navigate("materials")} />}
-            {view === "practice" && <PracticePanel materialSetId={activeSet?.id} projects={activeSet?.materials.filter((item) => item.kind === "project_archive") ?? []} conversationId={practiceConversationId} onConversationId={setPracticeConversationId} />}
             {view === "history" && <ConversationHistoryView materialSetId={activeSet?.id} onOpen={(id) => { setPracticeConversationId(id); navigate("practice"); }} />}
           </div>
           {selectedEvidence && <EvidencePanel evidence={selectedEvidence} onClose={() => setSelectedEvidence(null)} />}
@@ -167,10 +180,8 @@ function viewFromHash(): View {
 }
 
 function ConversationHistoryView({ materialSetId, onOpen }: { materialSetId?: string; onOpen: (id: string) => void }) {
-  const query = useQuery({ queryKey: ["practice-conversations", materialSetId], queryFn: () => api<Array<{ id: string; title: string; summary: string; updatedAt: string }>>(`/api/v1/material-sets/${materialSetId}/conversations`), enabled: Boolean(materialSetId) });
-  const items = query.data ?? [];
   if (!materialSetId) return <EmptyPage title="先选择材料集合" action="选择材料集合后查看对话历史" />;
-  return <section className="page-stack"><div className="page-heading compact-heading"><div><span className="eyebrow">CONVERSATION HISTORY</span><h2>对话历史</h2><p>每个对话绑定创建时的材料版本，材料更新不会改写历史练习。</p></div></div><div className="conversation-history-list">{items.map((item) => <button key={item.id} className="history-card" onClick={() => onOpen(item.id)}><MessageSquare size={17} /><span><b>{item.title}</b><small>{item.summary || "还没有练习摘要"}</small></span><ChevronRight size={16} /></button>)}{!items.length && <div className="empty-panel large-empty">还没有历史对话。</div>}</div></section>;
+  return <section className="page-stack"><div className="page-heading compact-heading"><div><span className="eyebrow">CONVERSATION HISTORY</span><h2>对话历史</h2><p>每个对话绑定创建时的材料版本，材料更新不会改写历史练习。</p></div></div><ConversationHistory materialSetId={materialSetId} onOpen={onOpen} /></section>;
 }
 
 function Overview({ sets, activeSet, onCreate, onSelect }: { sets: MaterialSet[]; activeSet?: MaterialSet; onCreate: () => void; onSelect: (id: string, view?: View) => void }) {

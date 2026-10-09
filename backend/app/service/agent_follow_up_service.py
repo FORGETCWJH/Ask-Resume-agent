@@ -42,6 +42,7 @@ from ..models import (
     PracticeTurn,
     QuestionVersion,
     ReferenceAnswer,
+    now,
 )
 
 
@@ -63,6 +64,8 @@ class AgentFollowUpService:
 
     def create_question_run(self, conversation_id: str, scope: QuestionScope) -> LlmRunOut:
         conversation = self._conversation(conversation_id)
+        if conversation.archived_at is not None:
+            raise AppError(409, "CONVERSATION_ARCHIVED", "Conversation archived", "归档对话需要恢复后才能生成问题")
         normalized = DomainQuestionScope.model_validate(scope.model_dump())
         if not normalized.project_ids and normalized.scope_type == "project":
             normalized.project_ids = list(normalized.target_ids)
@@ -80,6 +83,7 @@ class AgentFollowUpService:
         }
         run = LlmRun(conversation_id=conversation.id, kind="question_generation", request_json=json.dumps(request, ensure_ascii=False))
         self.db.add(run)
+        self._reserve(run)
         self.db.commit()
         self.db.refresh(run)
         self._schedule(run.id)
@@ -99,6 +103,9 @@ class AgentFollowUpService:
         answer = PracticeAnswer(turn_id=turn.id, version=latest + 1, content=normalized, fingerprint=fingerprint_answer(normalized))
         self.db.add(answer)
         turn.answer_text = normalized
+        conversation = self._conversation(turn.conversation_id)
+        conversation.last_activity_at = now()
+        conversation.updated_at = conversation.last_activity_at
         self.db.commit()
         self.db.refresh(answer)
         return PracticeAnswerOut(turn_id=turn.id, answer=answer.content, answer_version=answer.version, answer_id=answer.id, saved_at=answer.created_at)
@@ -121,6 +128,7 @@ class AgentFollowUpService:
         request = {"question": turn.question_text, "questionVersionId": turn.question_version_id, "snapshotFingerprint": snapshot_fp, "promptVersion": REFERENCE_PROMPT_VERSION}
         run = LlmRun(conversation_id=turn.conversation_id, turn_id=turn.id, kind="reference_answer", request_json=json.dumps(request, ensure_ascii=False))
         self.db.add(run)
+        self._reserve(run)
         self.db.commit()
         self.db.refresh(run)
         self._schedule(run.id)
@@ -148,6 +156,7 @@ class AgentFollowUpService:
         }
         run = LlmRun(conversation_id=turn.conversation_id, turn_id=turn.id, kind=kind, request_json=json.dumps(request, ensure_ascii=False))
         self.db.add(run)
+        self._reserve(run)
         self.db.commit()
         self.db.refresh(run)
         self._schedule(run.id)
@@ -165,8 +174,28 @@ class AgentFollowUpService:
             raise not_found("LLM_RUN_NOT_FOUND", "模型任务不存在")
         if old.status not in {"failed", "cancelled"}:
             raise AppError(409, "LLM_RUN_NOT_RETRYABLE", "Run is not retryable", "只有失败或取消的任务可以重试")
+        conversation = self._conversation(old.conversation_id)
+        if conversation.archived_at is not None:
+            raise AppError(409, "CONVERSATION_ARCHIVED", "Conversation archived", "归档对话不能重试任务")
+        if old.kind == "input":
+            from .practice_service import PracticeService
+            service = PracticeService(self.db)
+            service.state(old.conversation_id)
+            item = service.repo.input(json.loads(old.request_json)["inputId"])
+            if not service.repo.claim(old.conversation_id, item.id):
+                self.db.rollback()
+                raise AppError(409, "CONVERSATION_BUSY", "Conversation busy", "对话正在处理另一个输入")
         retry = LlmRun(conversation_id=old.conversation_id, turn_id=old.turn_id, kind=old.kind, request_json=old.request_json)
         self.db.add(retry)
+        self.db.flush()
+        if old.kind == "input":
+            item.run_id = retry.id
+            state_row = service.repo.state(old.conversation_id)
+            state = json.loads(state_row.state_json)
+            state["lastRunId"] = retry.id
+            state_row.state_json = json.dumps(state, ensure_ascii=False)
+        else:
+            self._reserve(retry)
         self.db.commit()
         self.db.refresh(retry)
         self._schedule(retry.id)
@@ -178,11 +207,20 @@ class AgentFollowUpService:
             raise not_found("LLM_RUN_NOT_FOUND", "模型任务不存在")
         if run.status in {"queued", "running"}:
             run.status = "cancelled"
+            from ..repository.practice_repository import PracticeRepository
+            PracticeRepository(self.db).release(run.conversation_id, json.loads(run.request_json)["inputId"] if run.kind == "input" else run.id)
             self.db.commit()
         return self.serialize_run(run)
 
     def serialize_run(self, run: LlmRun) -> LlmRunOut:
-        return LlmRunOut(id=run.id, status=run.status, kind=run.kind, conversation_id=run.conversation_id, practice_turn_id=run.turn_id, result=json.loads(run.result_json) if run.result_json else None, error=run.error_message, created_at=run.created_at, updated_at=run.updated_at)
+        result = json.loads(run.result_json) if run.result_json else None
+        if run.kind == "input" and result is None:
+            from ..repository.practice_repository import PracticeRepository
+            item = PracticeRepository(self.db).input(json.loads(run.request_json).get("inputId"))
+            if item:
+                steps = json.loads(item.steps_json)
+                result = {"completedSteps": list(steps), "answerVersionId": steps.get("answerId"), "preferenceChanges": steps.get("preferences", [])}
+        return LlmRunOut(id=run.id, status=run.status, kind=run.kind, conversation_id=run.conversation_id, practice_turn_id=run.turn_id, result=result, error=run.error_message, created_at=run.created_at, updated_at=run.updated_at)
 
     def serialize_turn(self, turn: PracticeTurn) -> PracticeTurnOut:
         answer = self._latest_answer(turn.id)
@@ -206,6 +244,9 @@ class AgentFollowUpService:
         turn = self.db.get(PracticeTurn, turn_id)
         if not turn:
             raise not_found("PRACTICE_TURN_NOT_FOUND", "练习问题不存在")
+        conversation = self._conversation(turn.conversation_id)
+        if conversation.archived_at is not None:
+            raise AppError(409, "CONVERSATION_ARCHIVED", "Conversation archived", "归档对话需要恢复后才能修改练习")
         return turn
 
     def _latest_answer(self, turn_id: str) -> PracticeAnswer | None:
@@ -265,8 +306,27 @@ class AgentFollowUpService:
             if run:
                 run.status = "failed"
                 run.error_message = str(exc)[:1000]
+                from ..repository.practice_repository import PracticeRepository
+                PracticeRepository(self.db).release(run.conversation_id, json.loads(run.request_json)["inputId"] if run.kind == "input" else run.id)
                 self.db.commit()
             raise AppError(503, "TASK_QUEUE_UNAVAILABLE", "Task queue unavailable", "后台任务队列暂时不可用，请稍后重试") from exc
+
+    def _reserve(self, run):
+        from ..repository.practice_repository import PracticeRepository
+        repo = PracticeRepository(self.db)
+        row = repo.state(run.conversation_id)
+        if row.busy_input_id:
+            item = repo.input(row.busy_input_id)
+            active = repo.run(item.run_id if item else row.busy_input_id)
+            if not active or active.status in {"failed", "cancelled", "succeeded"}:
+                repo.release(run.conversation_id, row.busy_input_id)
+        self.db.flush()
+        if not repo.claim(run.conversation_id, run.id):
+            self.db.rollback()
+            raise AppError(409, "CONVERSATION_BUSY", "Conversation busy", "当前对话正在处理其他任务")
+        state = json.loads(row.state_json)
+        state["lastRunId"] = run.id
+        row.state_json = json.dumps(state, ensure_ascii=False)
 
 
 def _run_in_background(run_id: str) -> None:
@@ -296,11 +356,17 @@ class AgentWorker:
                 result = asyncio.run(run_short_graph(lambda: self._generate_feedback(run), node_name="feedbackNode"))
             elif run.kind == "follow_up":
                 result = asyncio.run(run_short_graph(lambda: self._generate_follow_up(run), node_name="followUpNode"))
+            elif run.kind == "input":
+                from .practice_service import PracticeService
+                result = asyncio.run(PracticeService(self.db).process(run, self))
             else:
                 raise LLMError(f"未知模型任务：{run.kind}")
-            self.db.refresh(run)
-            if run.status == "cancelled":
-                return
+            from ..repository.practice_repository import PracticeRepository
+            PracticeRepository(self.db).guard_running(run.id)
+            if run.kind != "input":
+                from .practice_service import PracticeService
+                PracticeService(self.db).publish_shortcut(run, result)
+                PracticeRepository(self.db).release(run.conversation_id, run.id)
             run.result_json = json.dumps(result, ensure_ascii=False)
             run.status = "succeeded"
             run.error_message = None
@@ -310,24 +376,34 @@ class AgentWorker:
             if run and run.status != "cancelled":
                 run.status = "failed"
                 run.error_message = str(exc)[:1000]
+                from ..repository.practice_repository import PracticeRepository
+                PracticeRepository(self.db).release(run.conversation_id, json.loads(run.request_json)["inputId"] if run.kind == "input" else run.id)
         self.db.commit()
 
     def _revision_evidence(self, conversation: Conversation, scope: dict[str, Any] | None = None) -> list[dict]:
-        query = self.db.query(EvidenceChunk).join(Material).filter(Material.revision_id == conversation.revision_id).order_by(EvidenceChunk.chunk_order.asc())
+        from ..repository.practice_repository import PracticeRepository
+        snapshot = json.loads(PracticeRepository(self.db).state(conversation.id).snapshot_json)
         scope = scope or {}
         project_ids = set(scope.get("projectIds", scope.get("project_ids", [])))
-        if project_ids:
-            query = query.filter(Material.id.in_(project_ids))
-        rows = query.limit(120).all()
-        return [{"id": row.id, "content": row.content, "material_id": row.material_id, "source_path": row.source_path, "page_number": row.page_number} for row in rows]
+        sections = set(scope.get("resumeSections", []))
+        return [f for f in snapshot.get("facts", []) if (not project_ids or f.get("materialId") in project_ids) and (not sections or "section" not in f or f["section"] in sections)]
+
+    def _safe_context(self, conversation_id, text):
+        from ..repository.practice_repository import PracticeRepository
+        from ..domain.practice_intent import redact_context
+        snapshot = json.loads(PracticeRepository(self.db).state(conversation_id).snapshot_json)
+        return redact_context(text, snapshot.get("personalValues", []))
 
     async def _generate_questions(self, run: LlmRun) -> dict:
         conversation = self.db.get(Conversation, run.conversation_id)
         request = json.loads(run.request_json or "{}")
         scope = DomainQuestionScope.model_validate(request.get("scope", {}))
-        evidence = self._revision_evidence(conversation, request.get("scope", {}))
-        context = "问题范围：" + json.dumps(request.get("scope", {}), ensure_ascii=False) + "\n材料证据：\n" + "\n".join(f"[{item['id']}] {item['content']}" for item in evidence)[:55_000]
-        response = await get_llm_client().structured(mode="questionGeneration", context=context, user_text="生成练习问题", schema=QuestionGenerationResponse)
+        evidence = request.get("facts") if "facts" in request else self._revision_evidence(conversation, request.get("scope", {}))
+        context = "问题范围：" + json.dumps(request.get("scope", {}), ensure_ascii=False) + "\n" + (request.get("context") or ("材料证据：\n" + "\n".join(f"[{item['id']}] {item['content']}" for item in evidence)))
+        context = context[:24000]
+        response = await get_llm_client().structured(mode="questionGeneration", context=self._safe_context(run.conversation_id, context), user_text="生成练习问题", schema=QuestionGenerationResponse)
+        from ..repository.practice_repository import PracticeRepository
+        PracticeRepository(self.db).guard_running(run.id)
         questions = [item.model_dump(mode="json", by_alias=True) for item in response.questions[: scope.count]]
         if not questions:
             questions = [{"text": "请介绍一个你最熟悉的项目，并说明你亲自负责的核心部分。", "type": "project", "evidenceIds": []}]
@@ -349,9 +425,11 @@ class AgentWorker:
         response = await get_llm_client().structured(
             mode="referenceAnswer",
             context="当前代码证据功能尚未启用，不能验证候选人的项目实现。",
-            user_text=turn.question_text,
+            user_text=self._safe_context(run.conversation_id, turn.question_text),
             schema=ReferenceAnswerResponse,
         )
+        from ..repository.practice_repository import PracticeRepository
+        PracticeRepository(self.db).guard_running(run.id)
         answer = response.model_dump(mode="json", by_alias=True)
         answer.update({"evidenceGrade": "insufficient", "codeEvidence": [], "limitations": ["当前阶段尚未启用代码证据"]})
         reference = ReferenceAnswer(
@@ -373,10 +451,12 @@ class AgentWorker:
         answer = self.db.get(PracticeAnswer, request.get("answerId"))
         response = await get_llm_client().structured(
             mode="feedback",
-            context=f"问题：{turn.question_text}\n候选人回答：{answer.content if answer else request.get('answer', '')}",
-            user_text=answer.content if answer else "",
+            context=self._safe_context(run.conversation_id, request.get("context", "") + f"\n问题：{turn.question_text}\n候选人回答：{answer.content if answer else request.get('answer', '')}"),
+            user_text=self._safe_context(run.conversation_id, answer.content if answer else ""),
             schema=FeedbackResponse,
         )
+        from ..repository.practice_repository import PracticeRepository
+        PracticeRepository(self.db).guard_running(run.id)
         result = response.model_dump(mode="json", by_alias=True)
         feedback = PracticeFeedback(turn_id=turn.id, answer_id=answer.id, prompt_version=FEEDBACK_PROMPT_VERSION, result_json=json.dumps(result, ensure_ascii=False))
         self.db.add(feedback)
@@ -393,10 +473,12 @@ class AgentWorker:
             raise AppError(409, "FOLLOW_UP_DEPTH_REACHED", "Follow-up depth reached", "当前追问已达到 3 层上限")
         response = await get_llm_client().structured(
             mode="followUp",
-            context=f"问题：{turn.question_text}\n回答：{answer.content}\n反馈：{feedback.result_json if feedback else '尚未查看反馈'}",
+            context=self._safe_context(run.conversation_id, request.get("context", "") + f"\n问题：{turn.question_text}\n回答：{answer.content}\n反馈：{feedback.result_json if feedback else '尚未查看反馈'}"),
             user_text="请针对回答缺口生成一个继续追问",
             schema=FollowUpQuestionResponse,
         )
+        from ..repository.practice_repository import PracticeRepository
+        PracticeRepository(self.db).guard_running(run.id)
         child = PracticeTurn(
             conversation_id=turn.conversation_id,
             revision_id=turn.revision_id,

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -93,8 +93,24 @@ class Conversation(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     revision_id: Mapped[str] = mapped_column(ForeignKey("material_revisions.id", ondelete="CASCADE"), index=True)
+    group_id: Mapped[str | None] = mapped_column(ForeignKey("conversation_groups.id", ondelete="SET NULL"), index=True, nullable=True)
     title: Mapped[str] = mapped_column(String(200), default="新的练习")
     summary: Mapped[str] = mapped_column(Text, default="")
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class ConversationGroup(Base):
+    __tablename__ = "conversation_groups"
+    __table_args__ = (UniqueConstraint("material_set_id", "normalized_name", name="uq_conversation_group_set_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    material_set_id: Mapped[str] = mapped_column(ForeignKey("material_sets.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    normalized_name: Mapped[str] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
@@ -213,3 +229,56 @@ class LlmRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class PracticeState(Base):
+    __tablename__ = "conversation_practice_states"
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True)
+    snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    state_json: Mapped[str] = mapped_column(Text, default="{}")
+    busy_input_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class PracticeEvent(Base):
+    __tablename__ = "practice_events"
+    __table_args__ = (UniqueConstraint("conversation_id", "sequence"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(20))
+    message_type: Mapped[str] = mapped_column(String(32))
+    content: Mapped[str] = mapped_column(Text)
+    data_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PracticeInput(Base):
+    __tablename__ = "practice_inputs"
+    __table_args__ = (UniqueConstraint("conversation_id", "client_request_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    client_request_id: Mapped[str] = mapped_column(String(80))
+    content: Mapped[str] = mapped_column(Text)
+    run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    steps_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class PracticePreference(Base):
+    __tablename__ = "practice_preferences"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    key: Mapped[str] = mapped_column(String(40), unique=True)
+    value_json: Mapped[str] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class PracticePreferenceSource(Base):
+    __tablename__ = "practice_preference_sources"
+    __table_args__ = (UniqueConstraint("preference_id", "conversation_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    preference_id: Mapped[str] = mapped_column(ForeignKey("practice_preferences.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    original_instruction: Mapped[str] = mapped_column(Text)

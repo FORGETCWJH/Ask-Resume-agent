@@ -1,114 +1,140 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, CircleHelp, Code2, LoaderCircle, MessageSquare, Play, Plus, RefreshCw, Save, Sparkles } from "lucide-react";
-import { api } from "../../api/client";
-import type { LlmRun, Material, PracticeConversation, PracticeTurn, QuestionScope } from "../../types/api";
+import { ArrowUp, ChevronRight, FileText, FolderOpen, List, LoaderCircle, Menu, MessageSquare, Plus, Settings2, X } from "lucide-react";
+import { practiceApi } from "../../api/practice";
+import type { MaterialSet, PracticeMessage, PracticePreference, ResumeSnapshot } from "../../types/api";
+import { ConversationHistory } from "../history/ConversationHistory";
 
-type Props = { materialSetId?: string; projects: Material[]; conversationId: string | null; onConversationId: (id: string | null) => void };
+type Props = { materialSetId?: string; materialSets: MaterialSet[]; conversationId: string | null; onConversationId: (id: string | null) => void; onMaterials: () => void; onSelectSet: (id: string) => void; onEditResume: () => void };
+const sectionNames: Record<string, string> = { personalInfo: "个人信息", skills: "技能掌握", workExperiences: "工作 / 实习经历", projects: "项目经验" };
 
-export function PracticePanel({ materialSetId, projects, conversationId, onConversationId }: Props) {
+export function PracticePanel({ materialSetId, materialSets, conversationId, onConversationId, onMaterials, onSelectSet, onEditResume }: Props) {
   const client = useQueryClient();
-  const [scope, setScope] = useState<QuestionScope>({ projectIds: [], resumeSections: ["skills", "workExperiences", "projects"], direction: "实现细节与技术取舍", questionType: "implementation", difficulty: "intermediate", count: 5 });
-  const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [draft, setDraft] = useState("");
+  const [runId, setRunId] = useState<string | null>(null);
+  const [failedId, setFailedId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
-  const [showCustomTopic, setShowCustomTopic] = useState(false);
-
-  const conversationsQuery = useQuery({
-    queryKey: ["practice-conversations", materialSetId],
-    queryFn: () => api<PracticeConversation[]>(`/api/v1/material-sets/${materialSetId}/conversations`),
-    enabled: Boolean(materialSetId),
-  });
-  const conversations = conversationsQuery.data ?? [];
+  const [panel, setPanel] = useState<"resume" | "preferences" | null>(null);
+  const [menu, setMenu] = useState(false);
+  const scroll = useRef<HTMLDivElement>(null);
+  const nearBottom = useRef(true);
+  const processedRun = useRef<string | null>(null);
+  const retryInput = useRef<{ id: string; content: string } | null>(null);
+  const draftKey = `practice-draft:${conversationId ?? materialSetId ?? "new"}`;
+  const history = useQuery({ queryKey: ["practice-conversations", materialSetId], queryFn: () => practiceApi.conversations(materialSetId!, { status: "all" }), enabled: Boolean(materialSetId) });
+  const conversations = history.data ?? [];
   useEffect(() => {
-    if (!materialSetId || conversationId) return;
-    const remembered = window.localStorage.getItem(`practice-conversation:${materialSetId}`);
-    const candidate = conversations.find((item) => item.id === remembered) ?? conversations[0];
-    if (candidate) onConversationId(candidate.id);
-  }, [materialSetId, conversationId, conversations, onConversationId]);
+    if (!conversationId && materialSetId) {
+      const remembered = localStorage.getItem(`practice-conversation:${materialSetId}`);
+      const candidate = conversations.find(c => c.id === remembered) ?? conversations.find(c => !c.isArchived);
+      if (candidate) onConversationId(candidate.id);
+    }
+  }, [conversations, conversationId, materialSetId, onConversationId]);
   useEffect(() => {
-    if (materialSetId && conversationId) window.localStorage.setItem(`practice-conversation:${materialSetId}`, conversationId);
-  }, [materialSetId, conversationId]);
-
-  const turnsQuery = useQuery({
-    queryKey: ["practice-turns", conversationId],
-    queryFn: () => api<{ items: PracticeTurn[] }>(`/api/v1/conversations/${conversationId}/practice-turns`),
-    enabled: Boolean(conversationId),
-  });
-  const runQuery = useQuery({
-    queryKey: ["llm-run", activeRunId],
-    queryFn: () => api<LlmRun>(`/api/v1/llm-runs/${activeRunId}`),
-    enabled: Boolean(activeRunId),
-    refetchInterval: (query) => query.state.data && ["succeeded", "failed", "cancelled"].includes(query.state.data.status) ? false : 700,
-  });
+    setDraft(localStorage.getItem(draftKey) ?? "");
+    setRunId(null); setFailedId(null); setNotice(""); retryInput.current = null;
+    nearBottom.current = true;
+    processedRun.current = null;
+    if (materialSetId && conversationId) localStorage.setItem(`practice-conversation:${materialSetId}`, conversationId);
+  }, [draftKey, materialSetId, conversationId]);
+  const state = useQuery({ queryKey: ["chat-state", conversationId], queryFn: () => practiceApi.state(conversationId!), enabled: Boolean(conversationId), refetchInterval: q => q.state.data?.activeRunId ? 700 : false });
+  const messages = useQuery({ queryKey: ["chat-messages", conversationId], queryFn: () => practiceApi.messages(conversationId!), enabled: Boolean(conversationId) });
+  const turns = useQuery({ queryKey: ["practice-turns", conversationId], queryFn: () => practiceApi.turns(conversationId!), enabled: Boolean(conversationId) });
+  const snapshots = useQuery({ queryKey: ["resume-snapshots", conversationId], queryFn: () => practiceApi.snapshots(conversationId!), enabled: Boolean(conversationId) && panel === "resume" });
+  const preferences = useQuery({ queryKey: ["practice-preferences"], queryFn: practiceApi.preferences, enabled: panel === "preferences" });
+  const activeId = runId ?? state.data?.activeRunId ?? null;
+  const lookupId = activeId ?? state.data?.lastRunId ?? null;
+  const run = useQuery({ queryKey: ["llm-run", lookupId], queryFn: () => practiceApi.run(lookupId!), enabled: Boolean(lookupId), refetchInterval: q => q.state.data && ["succeeded", "failed", "cancelled"].includes(q.state.data.status) ? false : 500 });
+  function refresh() {
+    for (const key of ["chat-state", "chat-messages", "practice-turns"]) client.invalidateQueries({ queryKey: [key, conversationId] });
+    client.invalidateQueries({ queryKey: ["practice-conversations", materialSetId] });
+    client.invalidateQueries({ queryKey: ["practice-preferences"] });
+  }
   useEffect(() => {
-    const run = runQuery.data;
-    if (!run || !activeRunId || !["succeeded", "failed", "cancelled"].includes(run.status)) return;
-    if (run.status === "succeeded") {
-      client.invalidateQueries({ queryKey: ["practice-turns", conversationId] });
-      client.invalidateQueries({ queryKey: ["practice-conversations", materialSetId] });
-      setNotice(run.kind === "reference_answer" ? "参考答案已生成" : run.kind === "feedback" ? "反馈已生成" : run.kind === "follow_up" ? "下一条追问已生成" : "问题已生成");
-    } else setNotice(run.error ?? "任务未完成，请重试");
-    setActiveRunId(null);
-  }, [runQuery.data, activeRunId, client, conversationId, materialSetId]);
-
-  const createQuestion = useMutation<{ runId: string }, Error, boolean>({
-    mutationFn: async (newVersion = false) => {
-      let currentConversationId = conversationId;
-      if (!currentConversationId) {
-        if (!materialSetId) throw new Error("请先选择材料集合");
-        const conversation = await api<{ id: string }>(`/api/v1/material-sets/${materialSetId}/conversations`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "面试练习" }) });
-        currentConversationId = conversation.id;
-        onConversationId(currentConversationId);
-      }
-      return api<{ runId: string }>(`/api/v1/conversations/${currentConversationId}/question-runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...scope, newVersion }) });
+    const value = run.data;
+    if (!value || !["succeeded", "failed", "cancelled"].includes(value.status) || processedRun.current === value.id) return;
+    processedRun.current = value.id;
+    setRunId(null);
+    if (value.status !== "succeeded") { setFailedId(value.id); setNotice(value.error ?? "任务已取消，可重试未完成步骤。"); }
+    else { setFailedId(null); setNotice(""); }
+    refresh();
+  }, [run.data]);
+  useEffect(() => { if (nearBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [messages.data, activeId]);
+  const create = useMutation({ mutationFn: () => practiceApi.create(materialSetId!), onSuccess: c => { onConversationId(c.id); setMenu(false); client.invalidateQueries({ queryKey: ["practice-conversations", materialSetId] }); }, onError: e => setNotice(e.message) });
+  const send = useMutation({
+    mutationFn: async (content: string) => {
+      let cid = conversationId;
+      if (!cid) { const c = await practiceApi.create(materialSetId!); cid = c.id; onConversationId(cid); }
+      const previous = retryInput.current;
+      const request = previous?.content === content ? previous : { id: crypto.randomUUID(), content };
+      retryInput.current = request;
+      return practiceApi.input(cid, content, request.id);
     },
-    onSuccess: (run) => { setActiveRunId(run.runId); setNotice("已提交生成任务，正在准备问题"); },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "生成任务提交失败"),
+    onSuccess: result => { retryInput.current = null; localStorage.removeItem(draftKey); setDraft(""); setRunId(result.runId); setFailedId(null); setNotice(""); nearBottom.current = true; refresh(); },
+    onError: e => setNotice(e.message),
   });
-  const saveAnswer = useMutation({
-    mutationFn: ({ turnId, content }: { turnId: string; content: string }) => api(`/api/v1/practice-turns/${turnId}/answers`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }) }),
-    onSuccess: (_, variables) => { client.invalidateQueries({ queryKey: ["practice-turns", conversationId] }); setNotice("回答已提交，不会触发模型调用"); setAnswers((current) => ({ ...current, [variables.turnId]: "" })); },
-  });
-  const referenceAnswer = useMutation<{ runId: string }, Error, string>({ mutationFn: (turnId) => api<{ runId: string }>(`/api/v1/practice-turns/${turnId}/reference-answer-runs`, { method: "POST" }), onSuccess: (run, turnId) => { setActiveTurnId(turnId); setActiveRunId(run.runId); setNotice("已提交参考答案任务"); } });
-  const feedbackRun = useMutation<{ runId: string }, Error, string>({ mutationFn: (turnId) => api<{ runId: string }>(`/api/v1/practice-turns/${turnId}/feedback-runs`, { method: "POST" }), onSuccess: (run, turnId) => { setActiveTurnId(turnId); setActiveRunId(run.runId); setNotice("已提交反馈任务"); } });
-  const followUpRun = useMutation<{ runId: string }, Error, string>({ mutationFn: (turnId) => api<{ runId: string }>(`/api/v1/practice-turns/${turnId}/follow-up-runs`, { method: "POST" }), onSuccess: (run, turnId) => { setActiveTurnId(turnId); setActiveRunId(run.runId); setNotice("已提交继续追问任务"); } });
-  const turns = turnsQuery.data?.items ?? [];
-
-  function toggleSection(section: string) {
-    setScope((current) => ({ ...current, resumeSections: current.resumeSections.includes(section) ? current.resumeSections.filter((item) => item !== section) : [...current.resumeSections, section] }));
-  }
-
-  function selectConversation(id: string) {
-    onConversationId(id);
-    setActiveRunId(null);
-    setActiveTurnId(null);
-  }
-
-  return <section className="practice-page page-stack">
-    <div className="page-heading compact-heading"><div><span className="eyebrow">INTERVIEW PRACTICE</span><h2>面试练习</h2><p>选择范围后生成问题；回答、反馈、参考答案和追问分别由你主动触发。</p></div><div className="practice-heading-actions"><button className="secondary-button" onClick={() => { onConversationId(null); setNotice("下一次生成会创建新的对话"); }}><Plus size={14} />新建对话</button><button className="primary-button" onClick={() => createQuestion.mutate(false)} disabled={createQuestion.isPending || Boolean(activeRunId)}><Play size={15} />生成问题</button></div></div>
-    <div className="practice-layout">
-      <aside className="practice-scope">
-        <div className="practice-section-label">历史对话</div>
-        <div className="conversation-list">{conversations.map((item) => <button key={item.id} className={`conversation-item ${item.id === conversationId ? "active" : ""}`} onClick={() => selectConversation(item.id)}><MessageSquare size={14} /><span>{item.title}</span></button>)}{!conversations.length && <small>生成第一组问题后会自动创建对话</small>}</div>
-        <div className="practice-section-label">问题范围</div>
-        <div className="scope-block"><span>简历模块</span>{[["skills", "技能掌握"], ["workExperiences", "实习经历"], ["projects", "项目经验"]].map(([value, label]) => <label className="scope-check" key={value}><input type="checkbox" checked={scope.resumeSections.includes(value)} onChange={() => toggleSection(value)} /><span>{label}</span></label>)}</div>
-        {projects.length > 0 && <div className="scope-block"><span>绑定项目档案</span>{projects.map((project) => <label className="scope-check" key={project.id}><input type="checkbox" checked={scope.projectIds.includes(project.id)} onChange={() => setScope((current) => ({ ...current, projectIds: current.projectIds.includes(project.id) ? current.projectIds.filter((id) => id !== project.id) : [...current.projectIds, project.id] }))} /><span>{project.filename}</span></label>)}</div>}
-        <label className="scope-field"><span>问题类型</span><select value={scope.questionType ?? ""} onChange={(event) => setScope((current) => ({ ...current, questionType: event.target.value || undefined }))}><option value="">不限</option><option value="implementation">实现细节</option><option value="tradeoff">方案权衡</option><option value="troubleshooting">问题排查</option><option value="systemDesign">系统设计</option></select></label>
-        <label className="scope-field"><span>难度</span><select value={scope.difficulty ?? ""} onChange={(event) => setScope((current) => ({ ...current, difficulty: event.target.value || undefined }))}><option value="">不限</option><option value="basic">基础</option><option value="intermediate">进阶</option><option value="advanced">高级</option></select></label>
-        <label className="scope-field"><span>练习方向</span><input value={scope.direction ?? ""} onChange={(event) => setScope((current) => ({ ...current, direction: event.target.value }))} placeholder="例如：缓存一致性与失败处理" /></label>
-        <button className="link-button" onClick={() => setShowCustomTopic((value) => !value)}>{showCustomTopic ? "收起自定义主题" : "添加自定义主题"}</button>
-        {showCustomTopic && <label className="scope-field"><span>自定义主题</span><textarea value={scope.topic ?? ""} onChange={(event) => setScope((current) => ({ ...current, topic: event.target.value }))} placeholder="模型会围绕此主题生成问题" /></label>}
-        <label className="scope-field"><span>问题数量</span><select value={scope.count} onChange={(event) => setScope((current) => ({ ...current, count: Number(event.target.value) }))}><option value={3}>3 个</option><option value={5}>5 个</option><option value={8}>8 个</option></select></label>
-        <div className="scope-note"><Sparkles size={14} />问题文本由模型生成，候选人只能调整范围。</div>
-      </aside>
-      <div className="practice-turns">{activeRunId && <div className="run-banner"><LoaderCircle size={15} className="spin" /><span>{runQuery.data?.status === "running" ? "模型正在处理" : "任务排队中"}</span><small>长链路不会阻塞当前页面</small></div>}{!conversationId && !turns.length && <div className="practice-empty"><CircleHelp size={24} /><strong>还没有练习问题</strong><span>选好范围后点击“生成问题”，问题生成才会开始。</span></div>}{turns.map((turn, index) => <PracticeTurnCard key={turn.id} turn={turn} index={index} answer={answers[turn.id] ?? turn.answer ?? ""} onAnswer={(content) => setAnswers((current) => ({ ...current, [turn.id]: content }))} onSave={() => saveAnswer.mutate({ turnId: turn.id, content: answers[turn.id] ?? turn.answer ?? "" })} onReference={() => { setActiveTurnId(turn.id); referenceAnswer.mutate(turn.id); }} onFeedback={() => { setActiveTurnId(turn.id); feedbackRun.mutate(turn.id); }} onFollowUp={() => { setActiveTurnId(turn.id); followUpRun.mutate(turn.id); }} referencePending={activeTurnId === turn.id && Boolean(activeRunId)} />)}</div>
+  const action = useMutation({ mutationFn: (kind: "feedback" | "reference-answer" | "follow-up") => practiceApi.action(state.data!.currentTurnId!, kind), onSuccess: r => { setRunId(r.runId); setFailedId(null); }, onError: e => setNotice(e.message) });
+  const next = useMutation({ mutationFn: () => practiceApi.next(conversationId!), onSuccess: refresh, onError: e => setNotice(e.message) });
+  const retry = useMutation({ mutationFn: () => practiceApi.retry(failedId!), onSuccess: r => { setRunId(r.runId); setFailedId(null); setNotice(""); }, onError: e => setNotice(e.message) });
+  const cancel = useMutation({ mutationFn: () => practiceApi.cancel(activeId!), onSuccess: refresh, onError: e => setNotice(e.message) });
+  const removePreference = useMutation({ mutationFn: practiceApi.deletePreference, onSuccess: () => client.invalidateQueries({ queryKey: ["practice-preferences"] }), onError: e => setNotice(e.message) });
+  const editPreference = useMutation({ mutationFn: ({ preference, value }: { preference: PracticePreference; value: string | number }) => practiceApi.updatePreference(preference, value), onSuccess: () => client.invalidateQueries({ queryKey: ["practice-preferences"] }), onError: e => setNotice(e.message) });
+  const currentTurn = turns.data?.items.find(t => t.id === state.data?.currentTurnId);
+  const selectedConversation = conversations.find(item => item.id === conversationId);
+  const archivedReadOnly = Boolean(selectedConversation?.isArchived);
+  const busy = Boolean(activeId) || send.isPending || action.isPending;
+  function updateDraft(text: string) { setDraft(text); localStorage.setItem(draftKey, text); }
+  function submit() { if (draft.trim() && !busy && materialSetId) send.mutate(draft.trim()); }
+  return <section className={`chat-shell ${menu ? "show-chat-menu" : ""}`}>
+    <aside className="chat-sidebar" aria-label="对话导航">
+      <div className="chat-brand"><span>/</span><b>问简历</b><button aria-label="关闭导航" className="chat-mobile" onClick={() => setMenu(false)}><X size={18} /></button></div>
+      <button className="chat-new" onClick={() => materialSetId ? create.mutate() : onMaterials()} disabled={create.isPending}><Plus size={16} />新建对话</button>
+      <label className="chat-set-picker">当前材料集合<select value={materialSetId ?? ""} onChange={e => onSelectSet(e.target.value)} aria-label="选择材料集合">{materialSets.map(s => <option key={s.id} value={s.id}>{s.title}</option>)}{!materialSets.length && <option value="">尚未创建</option>}</select></label>
+      <span className="chat-sidebar-label">历史对话</span>
+      <ConversationHistory materialSetId={materialSetId} selectedId={conversationId} compact onOpen={id => { if (id) onConversationId(id); setMenu(false); }} />
+      <div className="chat-sidebar-bottom"><button onClick={onMaterials}><FolderOpen size={16} />材料库</button><button onClick={() => { setMenu(false); setPanel("preferences"); }}><Settings2 size={16} />练习偏好</button><small>基于你的经历，练习自己的解释。</small></div>
+    </aside>
+    <div className="chat-main">
+      <header className="chat-topbar"><div><button className="chat-mobile" aria-label="打开导航" onClick={() => setMenu(true)}><Menu size={19} /></button><strong>{selectedConversation?.title ?? "面试练习"}</strong><span>{archivedReadOnly ? "已归档 · 只读" : state.data?.mainTurnIds.length ? `${state.data.currentIndex + 1} / ${state.data.mainTurnIds.length}${state.data.completed ? " · 已完成" : ""}` : "准备开始"}</span></div><button className="chat-resume-button" onClick={() => setPanel(panel === "resume" ? null : "resume")} disabled={!conversationId}><FileText size={15} />查看简历</button></header>
+      <div className="chat-scroll" ref={scroll} onScroll={() => { if (scroll.current) nearBottom.current = scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 100; }}>
+        <div className="chat-thread">
+          {!messages.data?.length && <div className="chat-welcome"><span className="chat-welcome-mark">/</span><small>你的经历，是练习的起点</small><h1>把项目讲清楚，<br />从一个问题开始。</h1><p>{materialSetId ? "告诉我想练习什么。我会结合已确认的简历，为你准备问题。" : "请先在材料库上传并确认一份简历。"}</p><div className="chat-suggestions">{["根据我的简历生成 5 个问题", "重点练习项目中的技术取舍"].map(text => <button key={text} onClick={() => updateDraft(text)} disabled={!materialSetId}>{text}<ChevronRight size={14} /></button>)}</div></div>}
+          {messages.data?.map(m => <MessageBubble key={m.id} message={m} />)}
+          {!messages.data?.length && currentTurn && <article className="chat-message assistant"><span>当前问题</span><p>{currentTurn.question}</p></article>}
+          {(activeId || send.isPending) && <div className="chat-task" data-testid="active-task" role="status"><LoaderCircle className="spin" size={15} /><span>{send.isPending ? "正在提交输入" : run.data?.status === "running" ? "正在理解你的输入并处理" : "任务已提交，正在排队"}</span>{activeId && <button onClick={() => cancel.mutate()} disabled={cancel.isPending}>取消</button>}</div>}
+          {messages.isError && <p role="alert">消息加载失败，请刷新重试。</p>}
+        </div>
+      </div>
+      <div className="chat-composer-area">
+        {archivedReadOnly && <div className="chat-archived-banner">此对话已归档，只读查看。请从历史菜单恢复后继续练习。</div>}
+        {state.data?.mainTurnIds.length ? <div className="chat-actions"><button onClick={() => action.mutate("feedback")} disabled={busy || archivedReadOnly || !currentTurn?.answer}>查看反馈</button><button onClick={() => action.mutate("reference-answer")} disabled={busy || archivedReadOnly || !currentTurn?.answer}>参考答案</button><button onClick={() => action.mutate("follow-up")} disabled={busy || archivedReadOnly || !currentTurn?.answer}>继续追问</button><button onClick={() => next.mutate()} disabled={busy || archivedReadOnly || next.isPending || state.data.completed}>下一题</button><details><summary><List size={13} />问题目录</summary><ol>{state.data.mainTurnIds.map((id, i) => <li key={id} aria-current={i === state.data!.currentIndex ? "step" : undefined}>{turns.data?.items.find(t => t.id === id)?.question ?? `第 ${i + 1} 题`}</li>)}</ol></details></div> : null}
+        {notice && <div className="chat-notice" role="alert"><span>{notice}</span>{failedId && <button onClick={() => retry.mutate()} disabled={retry.isPending}>重试未完成步骤</button>}<button aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>}
+        <form className="chat-composer" onSubmit={e => { e.preventDefault(); submit(); }}><textarea aria-label="练习输入" placeholder={archivedReadOnly ? "归档对话只读，请先恢复" : currentTurn ? "回答当前问题，或告诉我下一步想做什么…" : "例如：围绕我的实习项目，生成 5 个问题…"} value={draft} onChange={e => updateDraft(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); } }} readOnly={archivedReadOnly} /><button aria-label="发送消息" type="submit" disabled={archivedReadOnly || !draft.trim() || busy || !materialSetId}><ArrowUp size={20} /></button></form><small className="chat-composer-hint">Enter 发送 · Shift + Enter 换行<span>普通回答只保存，请求点评后才反馈</span></small>
+      </div>
     </div>
-    {notice && <div className="practice-notice">{notice}</div>}
+    {panel === "resume" && <aside className="chat-detail-panel" role="region" aria-label="对话简历"><header><div><small>对话绑定版本</small><h2>简历与原文依据</h2></div><button aria-label="关闭简历" onClick={() => setPanel(null)}><X size={18} /></button></header><div className="chat-detail-scroll">{snapshots.isPending && <p>正在读取简历…</p>}{snapshots.isError && <p role="alert">简历读取失败，请重试。</p>}{snapshots.data && <><small className="snapshot-version">材料版本 {snapshots.data.revisionId.slice(0, 8)}</small>{!snapshots.data.resumes.length && <p>此历史对话缺少可恢复的简历快照，不以最新简历代替。</p>}<ResumeReader resumes={snapshots.data.resumes} /><div className="snapshot-edit"><p>修改当前简历不会改变这个对话的历史快照。</p><button onClick={onEditResume}>编辑当前简历 <ChevronRight size={13} /></button></div></>}</div></aside>}
+    {panel === "preferences" && <aside className="chat-detail-panel" role="region" aria-label="练习偏好"><header><div><small>跨对话沿用</small><h2>练习偏好</h2></div><button aria-label="关闭偏好" onClick={() => setPanel(null)}><X size={18} /></button></header><div className="chat-detail-scroll"><p className="preference-intro">仅保存你明确要求长期沿用的练习方式。当前指令和本轮要求优先。</p>{preferences.isPending && <p>正在读取偏好…</p>}{preferences.data?.map(p => <PreferenceEditor key={`${p.id}:${p.revision}`} preference={p} onSave={value => editPreference.mutate({ preference: p, value })} onRemove={() => removePreference.mutate(p.id)} pending={removePreference.isPending || editPreference.isPending} />)}{preferences.data?.length === 0 && <p>暂无长期练习偏好</p>}</div></aside>}
   </section>;
 }
 
-function PracticeTurnCard({ turn, index, answer, onAnswer, onSave, onReference, onFeedback, onFollowUp, referencePending }: { turn: PracticeTurn; index: number; answer: string; onAnswer: (value: string) => void; onSave: () => void; onReference: () => void; onFeedback: () => void; onFollowUp: () => void; referencePending: boolean }) {
-  return <article className="practice-turn"><div className="practice-turn-heading"><span className="turn-number">{String(index + 1).padStart(2, "0")}</span><div><span className="eyebrow">QUESTION</span><h3>{turn.question}</h3>{turn.parentTurnId && <small className="follow-up-label">基于上一轮回答的追问</small>}</div></div><label className="answer-field"><span>你的回答</span><textarea value={answer} onChange={(event) => onAnswer(event.target.value)} placeholder="用自己的话回答，尽量说明你亲自负责的部分……" /></label><div className="turn-actions"><button className="secondary-button" onClick={onSave} disabled={!answer.trim()}><Save size={14} />提交回答</button><button className="secondary-button" onClick={onFeedback} disabled={!turn.answer || referencePending}><Sparkles size={14} />查看反馈</button><button className="secondary-button" onClick={onReference} disabled={!turn.answer || referencePending}><Code2 size={14} />{referencePending ? "处理中" : "查看参考答案"}</button><button className="secondary-button" onClick={onFollowUp} disabled={!turn.answer || referencePending}><MessageSquare size={14} />继续追问</button>{turn.answer && <span className="saved-label"><Check size={13} />已提交第 {turn.answerVersion ?? 1} 版</span>}</div>{turn.feedback && <div className="feedback-card"><div className="reference-heading"><Sparkles size={14} /><strong>回答反馈</strong></div><p>{turn.feedback.summary}</p>{turn.feedback.missingPoints?.map((item) => <small key={item}>待补充：{item}</small>)}{turn.feedback.nextPracticeStep && <small>下一步：{turn.feedback.nextPracticeStep}</small>}</div>}{turn.referenceAnswer && <div className="reference-answer"><div className="reference-heading"><MessageSquare size={14} /><strong>参考答案</strong><span className={`evidence-grade ${turn.referenceAnswer.evidenceGrade}`}>{turn.referenceAnswer.evidenceGrade}</span></div><p>{turn.referenceAnswer.answer}</p><small>{turn.referenceAnswer.limitations?.join("；") ?? "当前没有可展示的代码证据"}</small></div>}</article>;
+function MessageBubble({ message: m }: { message: PracticeMessage }) {
+  if (m.messageType === "answer") return <div className="chat-answer-record" data-message-type="answer">已保存为回答 v{m.answerVersion ?? 1}</div>;
+  const labels: Record<string, string> = { question: "面试问题", feedback: "回答反馈", referenceAnswer: "参考答案", followUp: "继续追问", clarification: "需要你确认" };
+  return <article className={`chat-message ${m.role === "user" ? "candidate" : "assistant"} ${m.messageType === "status" ? "system-note" : ""}`} data-message-type={m.messageType}>{m.role !== "user" && <span className="chat-message-label">{labels[m.messageType] ?? "练习助手"}</span>}<p>{m.content}</p>{m.result?.missingPoints?.length ? <div className="chat-feedback-points"><b>可以补充</b><ul>{m.result.missingPoints.map((p, i) => <li key={i}>{p}</li>)}</ul>{m.result.nextPracticeStep && <p>{m.result.nextPracticeStep}</p>}</div> : null}{m.result?.limitations?.map((l, i) => <small className="chat-limitation" key={i}>{l}</small>)}</article>;
+}
+function ResumeReader({ resumes }: { resumes: ResumeSnapshot[] }) {
+  const [selected, setSelected] = useState("");
+  const resume = resumes.find(r => r.materialId === selected) ?? resumes[0];
+  if (!resume) return null;
+  return <><label className="snapshot-file">简历文件<select value={resume.materialId} onChange={e => setSelected(e.target.value)}>{resumes.map(r => <option key={r.materialId} value={r.materialId}>{r.filename}</option>)}</select></label>{Object.entries(sectionNames).map(([key, name]) => <section className="snapshot-section" key={key}><h3>{name}</h3>{resume.sections[key as keyof typeof resume.sections] ? <SectionContent value={resume.sections[key as keyof typeof resume.sections]} /> : <p className="snapshot-unconfirmed">创建此对话时未确认该章节</p>}</section>)}<details className="snapshot-evidence"><summary>查看只读原文依据</summary>{resume.evidence.map(e => <section key={e.id}><small>{e.pageNumber ? `第 ${e.pageNumber} 页` : "段落原文"}</small><p>{e.content}</p></section>)}</details></>;
+}
+function SectionContent({ value }: { value: unknown }) {
+  if (Array.isArray(value)) return <>{value.map((v, i) => <div className="snapshot-entry" key={i}><b>{v.company || v.name}</b><small>{[v.role, v.timeRange, v.startDate, v.endDate].filter(Boolean).join(" · ")}</small><p>{v.description}</p></div>)}</>;
+  if (value && typeof value === "object") { const data = value as Record<string, unknown>; if (typeof data.content === "string") return <p>{data.content}</p>; return <dl>{Object.entries(data).filter(([key]) => !["confidence", "evidenceIds", "edited"].includes(key)).map(([key, v]) => v ? <div key={key}><dt>{({ name: "姓名", phone: "手机号", email: "邮箱", city: "城市", targetRole: "求职方向", links: "外部链接" } as Record<string, string>)[key] ?? key}</dt><dd>{Array.isArray(v) ? v.join("、") : String(v)}</dd></div> : null)}</dl>; }
+  return null;
+}
+function PreferenceEditor({ preference: p, onSave, onRemove, pending }: { preference: PracticePreference; onSave: (value: string | number) => void; onRemove: () => void; pending: boolean }) {
+  const [value, setValue] = useState(String(p.value));
+  const label = ({ count: "每组题数", topic: "练习主题", questionType: "问题类型", direction: "练习方向" } as Record<string, string>)[p.key] ?? p.key;
+  return <section className="preference-item"><b>{label}：{p.value}</b><input aria-label={`修改偏好 ${p.key}`} value={value} onChange={e => setValue(e.target.value)} type={p.key === "count" ? "number" : "text"} min={1} max={20} /><div><button onClick={() => onSave(p.key === "count" ? Number(value) : value)} disabled={pending || value === String(p.value)}>保存修改</button><button aria-label={`撤销偏好 ${p.key}`} onClick={onRemove} disabled={pending}>撤销偏好</button></div></section>;
 }

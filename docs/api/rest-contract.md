@@ -180,3 +180,118 @@ Agent 追问使用独立的练习轮次和异步任务资源。旧的 `POST /con
 `DELETE /materials/{materialId}` 只允许删除当前材料集合当前版本中的材料。服务创建排除该材料的新版本，旧版本、旧对话和历史证据保持可读；材料集合删除时才物理清理原始文件。材料不存在返回 `404 MATERIAL_NOT_FOUND`，材料不属于当前版本返回 `409 MATERIAL_NOT_ACTIVE`。
 
 `POST /materials/{materialId}/retry` 只用于当前版本的 `project_archive` 材料；重试前清理该材料旧的证据索引，再重新读取 ZIP 白名单文本文件，不执行其中任何代码。简历材料应使用 `/recognition/retry`。
+
+## 阶段七：对话式练习接口（已实现）
+
+需求基准：[对话式练习](../requirements/conversation-practice.md)。下表接口已实现。已有 `/messages` 兼容接口和 `/practice-turns/{turnId}/answers` 保存行为不变。
+
+| 方法 | 路径 | 成功状态 | 说明 |
+|---|---|---:|---|
+| POST | `/conversations/{id}/input-runs` | 202 | 保存自然语言输入并创建异步意图识别任务 |
+| GET | `/conversations/{id}/practice-messages` | 200 | 按稳定顺序分页获取输入、问题、回答、结果和澄清消息 |
+| GET | `/conversations/{id}/practice-state` | 200 | 获取当前主问题、问题组进度、追问链和待澄清状态 |
+| GET | `/conversations/{id}/resume-snapshots` | 200 | 获取绑定版本的只读简历章节与原文依据 |
+| POST | `/conversations/{id}/navigation-events` | 201 | 执行明确的下一题操作，不调用问题生成模型 |
+| GET | `/practice-preferences` | 200 | 查询当前候选人的长期练习偏好 |
+| PATCH | `/practice-preferences/{preferenceId}` | 200 | 显式修改长期练习偏好 |
+| DELETE | `/practice-preferences/{preferenceId}` | 204 | 删除或撤销长期偏好，重复删除同样返回 204 |
+
+### 自然语言输入与任务
+
+```json
+{
+  "content": "我使用缓存降低查询压力，请点评我的回答",
+  "clientRequestId": "uuid"
+}
+```
+
+响应 `{ "runId": "uuid", "status": "queued", "messageId": "uuid" }`。提交立即返回，HTTP 不等待模型。每条输入都经意图节点；明确快捷按钮沿用对应动作接口。对话内一次只处理一个改变练习状态的输入，忙碌时返回 `409 CONVERSATION_BUSY`，前端保留草稿。
+
+`clientRequestId` 在对话内唯一；同一 ID 和内容重复提交返回相同消息及任务，不重复创建回答或偏好。相同 ID 携带不同内容返回 `409 INPUT_IDEMPOTENCY_CONFLICT`。失败任务通过现有 `/llm-runs/{runId}/retry` 创建新运行记录，仍关联原消息并跳过已完成步骤。取消复用现有任务取消接口；已经保存的回答不会回滚，任务查询必须能明确展示已完成步骤。
+
+`messageId` 是稳定提交身份（`practice_inputs.id`）；消息流中的输入事件通过 `inputId` 关联它。消息事件有独立 ID。运行中的快捷动作与输入共用对话任务锁。`practice-state` 返回 `activeRunId` 与最近的 `lastRunId`；重试更新最近任务指针，刷新后仍可恢复失败提示或当前任务。
+
+`GET /llm-runs/{runId}` 沿用任务生命周期，新增 `runType=input` 和业务结果：
+
+```json
+{
+  "outcome": "recognized",
+  "action": "feedback",
+  "practiceTurnId": "uuid",
+  "answerVersionId": "uuid",
+  "createdMessageIds": ["uuid"],
+  "preferenceChanges": [],
+  "clarification": null
+}
+```
+
+`outcome` 为 `recognized|needsClarification|unsupported`。后两项均可为 `succeeded` 的正常业务结果，不当作供应商故障自动重试。真正模型/基础设施错误仍为 `failed`，保留稳定错误 code。
+
+输入任务即使失败或取消，也返回已持久化的 `completedSteps`、`answerVersionId` 与 `preferenceChanges`，以区分回答已经保存和反馈尚未完成。普通 `generate` 在范围和提示版本不变时复用当前题组；明确 `regenerate` 才创建新组。输入仍进行意图识别，但复用题组不调用问题生成节点。
+
+回答加点评指令先保存不可变回答版本，再生成绑定该版本的反馈；反馈失败时回答仍可查询。后端校验对话归属、目标问题、回答前置条件和冻结的版本，不直接执行未经校验的模型动作。当前无题且输入无法确定目标时先澄清，不把正文存为虚构问题的回答。
+
+### 消息、题组与简历
+
+`practice-messages` 接受 `afterSequence` 和有上限的 `limit`，返回 `{items, nextAfterSequence}`。消息包含 `id`、`sequence`、`role`、`messageType`、`content`、`runId`、`practiceTurnId`、`answerVersionId`、`createdAt`；不存在的关联为 `null`。消息类型区分输入、主问题、回答、反馈、参考答案、追问、澄清和状态提示，不将助手消息作为事实证据。
+
+`navigation-events` 请求为 `{action: "nextQuestion", clientRequestId: "uuid"}`，返回当前题与问题组进度；组尾返回 `completed=true`，不生成新题。自然语言“下一题”经过意图节点后执行相同领域规则。
+
+`resume-snapshots` 返回 `{conversationId, revisionId, resumes}`；每份包含文件名、材料 ID、确认章节、原文定位和 `snapshotStatus=available|missing`。未确认章节只显示状态，不返回草稿作为事实。旧对话无法恢复历史内容时返回 `missing` 及提示，不能回填最新简历。查看、轮询和刷新不调用 LLM。
+
+### 偏好与快照边界
+
+偏好对象包含 `id`、`key`、`value`、`revision`、`sourceConversationIds` 和时间。模型只能提出受支持键的变更；业务服务仅在候选人明确要求长期沿用时保存。修改请求为 `{value, expectedRevision}`；并发版本冲突返回 `409 PREFERENCE_VERSION_CONFLICT`。撤销针对显示的偏好 ID，旧任务和历史摘要不能重新写入已经删除的偏好。
+
+偏好键为 `count|topic|questionType|direction`，题数限制 1–20，文本最长 500 字符。意图变更必须带当前输入逐字依据 `instructionQuote` 和显式作用范围；不符合依据或版本不符时跳过写入。撤销保留不含原值的版本墓碑，阻止旧输入恢复偏好；集合删除时清理没有来源的记录。
+
+优先级为当前明确指令 > 本轮要求 > 长期偏好 > 默认值。提交任务固定事实快照、当前题、回答版本、消息边界和偏好版本；界面编辑不改变已提交任务输入。删除材料集合级联清理消息、短期记忆、摘要、事实快照、任务及偏好来源；无其他来源的偏好删除。取消或删除后 Worker 不得发布成功结果。
+
+## 阶段八：历史对话管理契约（已实现）
+
+本节接口已实现并通过 HTTP 集成验收。全部路径以 `/api/v1` 为前缀，管理操作均不调用 LLM。
+
+| 方法 | 路径 | 成功状态 | 目标行为 |
+|---|---|---:|---|
+| GET | `/material-sets/{id}/conversations` | 200 | 扩展历史筛选，范围包含集合所有材料版本 |
+| PATCH | `/conversations/{id}` | 200 | 原子更新标题、置顶、分组和归档状态 |
+| DELETE | `/conversations/{id}` | 204 | 删除对话及关联数据，重复删除仍返回 204 |
+| GET | `/material-sets/{id}/conversation-groups` | 200 | 返回单层分组数组 |
+| POST | `/material-sets/{id}/conversation-groups` | 201 | 创建集合内分组 |
+| PATCH | `/conversation-groups/{id}` | 200 | 重命名分组 |
+| DELETE | `/conversation-groups/{id}` | 204 | 对话转未分组；重复删除仍返回 204 |
+
+列表查询参数：`status=active|archived|all`（默认 `all`，兼容旧调用者）；`q` 为可选标题字面子串，去空白后最长 200 字符、大小写不敏感；可选 `groupId` 为具体分组 ID 或 `ungrouped`。各过滤条件取交集，具体分组必须属于目标集合。
+
+列表继续返回现有数组，对话对象保留既有字段，增加 `groupId`、`isPinned`、`pinnedAt`、`isArchived`、`archivedAt`、`lastActivityAt`。详情 `GET /conversations/{id}` 同样增量返回管理字段，归档后可正常读取。
+
+日常客户端显式请求 `status=active`；归档入口请求 `status=archived`；标题搜索及删除集合前获取完整 ID 清单请求 `status=all`。列表按置顶优先、置顶时间倒序、非置顶最近练习时间倒序、ID 升序排序；前端组织为置顶和分组区域，禁止重复展示。
+
+PATCH 示例：
+
+```json
+{
+  "title": "Redis 专项练习",
+  "isPinned": true,
+  "groupId": null,
+  "isArchived": false
+}
+```
+
+字段全部可选，但至少提供一个；只更新出现的字段。标题去空白后长度 1–200；布尔字段和标题不接受 null；`groupId:null` 清除归属。重复设置置顶/归档不改变对应时间，取消时清空时间。跨集合分组和组合请求中的任何非法字段均导致整次更新回滚。
+
+分组创建/更新请求为 `{ "name": "项目专项" }`；响应含 `id`、`materialSetId`、`name`、`createdAt`、`updatedAt`。名称去空白后长度 1–80，同集合去空白及大小写折叠后唯一，禁止使用“置顶”“未分组”“已归档”。列表按创建时间及 ID 升序返回，包含空组。
+
+| HTTP | 稳定 code | 触发条件 |
+|---|---|---|
+| 404 | `CONVERSATION_NOT_FOUND` | 对话读取/更新目标不存在 |
+| 404 | `CONVERSATION_GROUP_NOT_FOUND` | 分组读取/更新目标不存在 |
+| 409 | `CONVERSATION_GROUP_SCOPE_MISMATCH` | 对话或筛选关联其他集合的组 |
+| 409 | `CONVERSATION_GROUP_NAME_CONFLICT` | 同集合分组名冲突 |
+| 422 | `CONVERSATION_HISTORY_INVALID` | 空更新、非法标题/组名/过滤条件等管理输入 |
+| 409 | `CONVERSATION_BUSY` | queued/running 任务期间归档或单独删除 |
+| 409 | `CONVERSATION_ARCHIVED` | 向归档对话提交内容或重试任务 |
+
+所有错误使用 Problem Details。归档写保护覆盖自然语言输入、问题生成、回答、反馈、参考答案、追问、导航、任务重试、旧同步消息和补充确认；读取与管理允许。忙碌判断与归档/删除必须事务协调，任务取消后的迟到结果不得回写。
+
+单独删除移除消息、短期记忆/摘要/快照、练习与任务、候选人补充和偏好来源；无其他来源的偏好删除。材料版本及原始证据、其他对话的既有快照保留；材料版本级共享代码快照不因单独删除清理。材料集合删除仍清理普通及归档对话和分组。

@@ -2,13 +2,13 @@
 
 ## 层级 1：单元测试
 
-命令：`pytest backend/tests/unit -q`
+命令：`.\.venv\Scripts\python.exe -m pytest backend/tests/unit -q`
 
 阶段一覆盖领域规则、DTO 映射、文件安全检查、文本切分（含 DOCX 表格）、PDF/OCR、简历本地结构化识别草稿、PII 本地提取和证据引用；不得依赖或调用 LLM。必须通过。
 
 ## 层级 2：集成测试
 
-命令：`pytest backend/tests/integration -q`
+命令：`.\.venv\Scripts\python.exe -m pytest backend/tests/integration -q`
 
 阶段一通过 FastAPI 公共 HTTP 接口和临时 SQLite 验证创建集合、后台本地处理状态轮询、上传材料、OCR/解析状态、页级重试、识别草稿保存与确认、修改已确认模块后撤回事实证据、单份材料删除的版本隔离、证据查询和删除级联。对话上下文、补充确认和 LLM 调用属于后续阶段。必须通过。
 
@@ -66,8 +66,8 @@ Agent 追问属于跨后端、队列、LLM Worker、代码检索和前端的完�
 跨组件验收命令仍为：
 
 ```powershell
-pytest backend/tests/unit -q
-pytest backend/tests/integration -q
+.\.venv\Scripts\python.exe -m pytest backend/tests/unit -q
+.\.venv\Scripts\python.exe -m pytest backend/tests/integration -q
 cd frontend
 npm run test:e2e
 ```
@@ -79,3 +79,99 @@ npm run test:e2e
 ## 文档门禁
 
 接口、领域模型、功能链路或验收行为变化必须同步更新 `AGENTS.md` 索引指向的文档；文档未更新视为未完成。
+
+## 阶段七：对话式练习门禁（已实现、已验收）
+
+需求基准：[对话式练习](../requirements/conversation-practice.md)。先通过已有 Python 环境验证，再按行为切片观察失败测试并实现；环境异常不能通过安装依赖自行绕过。模型测试使用 Fake LLM，不调用真实供应商，不接触真实凭据。
+
+### 层级 1：单元测试必须通过
+
+- 意图结构、允许动作、歧义/不支持结果、目标归属及版本校验。
+- 普通回答与回答加点评的区别；不存在问题时不得创建虚假回答。
+- 当前指令 > 本轮要求 > 长期偏好 > 默认；“本轮”不持久化为长期偏好，模型推测不写入。
+- 上下文预算、摘要来源及消息边界；未确认草稿、回答和模型评价不是事实。
+- 下一题只切换已有主问题，追问保留父子关系，组尾不自动生成。
+- 消息身份和步骤幂等、取消后的发布保护、删除偏好后禁止摘要恢复。
+
+### 层级 2：集成测试必须通过
+
+通过公共 HTTP、临时 SQLite、Fake LLM 和测试队列验证：
+
+- 输入立即返回 `202 + runId`；每条输入调用意图节点，旧回答保存接口仍不调用 LLM。
+- 组合点评先保存回答再反馈；反馈失败后的重试不重复回答且绑定原回答版本。
+- 澄清落库并结束任务，刷新及下一条输入恢复待澄清事项；不支持意图是正常业务结果。
+- 重复请求 ID 返回同一消息；不同内容冲突；同一对话并发提交不乱序修改当前题。
+- 偏好跨对话生效、显式修改/撤销生效、临时要求隔离、具体回答和评价不跨对话。
+- 新旧对话读取各自确认内容和证据快照；不可恢复历史明确 `missing`，不回填最新简历。
+- 取消/删除后运行任务不回写；集合删除清理消息、状态、摘要、快照和无其他来源的偏好。
+- Alembic 从旧版本迁移到 head，旧接口和原有 OCR 行为继续兼容；迁移只使用隔离临时数据库。
+
+### 层级 3：真实浏览器端到端测试必须通过
+
+1. 进入白色对话页，确认单历史侧栏、统一输入框和顶部简历入口，不再显示难度/模块表单。
+2. 发送自然语言生成指令，查看任务状态和首题；默认题组及展开目录可用。
+3. 提交普通回答，没有自动反馈/参考答案/追问；提交回答加点评，看到绑定该版本的反馈。
+4. 查看参考答案的 `insufficient` 限制，继续追问后点下一题，只切换已有主问题；组尾不自动生成。
+5. 查看历史绑定版本的已确认简历和原文依据；修改当前简历后旧对话展示保持不变。
+6. 保存长期偏好，切换新对话查看生效；撤销后刷新不恢复；本轮要求不污染其他对话。
+7. 歧义输入显示单个澄清问题，刷新后继续回答；验证失败草稿保留、显式重试与取消。
+8. 删除集合后历史、记忆、快照和任务均不可访问；验证窄屏面板、键盘发送和阅读历史不强制滚动。
+
+现有 API smoke 和静态 UI 契约检查可以辅助回归，但不能代替真实浏览器验收。浏览器测试环境缺失时报告并等待授权，不能把本层标为通过。
+
+最终命令从项目根目录执行，Python 环境必须先确认；迁移命令须使用临时数据库配置：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest backend/tests/unit -q
+.\.venv\Scripts\python.exe -m pytest backend/tests/integration -q
+.\.venv\Scripts\python.exe -m alembic upgrade head
+npm --prefix frontend run build
+npm --prefix frontend run test:e2e
+```
+
+任何必需测试未执行或失败，阶段均为未完成；必须记录测试命令、通过数量、浏览器场景和剩余限制。阶段六历史 smoke 记录不构成本阶段的浏览器验收结果。
+
+### 2026-10-09 验收记录
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 单元 | `.\.venv\Scripts\python.exe -m pytest backend/tests/unit -q` | 46 passed |
+| 集成 | `.\.venv\Scripts\python.exe -m pytest backend/tests/integration -q` | 21 passed |
+| 构建 | `npm --prefix frontend run build` | TypeScript 与 Vite 构建通过 |
+| 端到端 | `npm --prefix frontend run test:e2e` | API smoke + 真实 Chromium 浏览器通过 |
+| 迁移 | `.\.venv\Scripts\python.exe -m alembic upgrade head` | 临时库空库迁移及 0005→0006 升级通过 |
+| 环境 | `.\.venv\Scripts\python.exe -m pip check` | No broken requirements found |
+
+浏览器脚本为 `frontend/tests/e2e/conversation-browser.mjs`，使用已有 Chromium 和 Node 原生 WebSocket/CDP，无新增测试依赖。它先真实渲染旧布局并观察失败，再验证新对话页、消息、回答版本、反馈、参考答案限制、追问、下一题、简历快照、偏好撤销、刷新、窄屏和删除。截图保存到脚本输出的临时目录。
+
+完整异常场景须使用 `backend/tests/browser_server.py` 启动隔离测试后端；它只在外部 LLM 边界注入延迟和一次失败，业务服务/数据库/队列保持真实。设置 `E2E_TEST_SCENARIOS=1` 后运行端到端命令，额外验证模型失败、刷新恢复失败、显式重试、取消及迟到结果不发布。提交失败在浏览器 Fetch 网络边界注入以检查草稿保留。正常开发服务器不包含这些测试行为。
+
+复现时先指定临时 `DATABASE_URL` 和 `APP_DATA_DIR`、空 `LLM_API_KEY`，再在独立终端启动测试后端及前端：
+
+```powershell
+.\.venv\Scripts\python.exe backend/tests/browser_server.py
+# 前端使用默认 5173，并连接隔离测试后端 8000
+npm --prefix frontend run dev -- --host 127.0.0.1 --strictPort
+# 验收终端
+$env:E2E_TEST_SCENARIOS='1'
+npm --prefix frontend run test:e2e
+```
+
+仅修改环境变量，不编辑 `.env`；不要将测试服务器连接到真实候选人数据库。真实供应商质量不属于确定性测试结论，当前代码证据仍明确为 `insufficient`。
+
+## 阶段八：历史对话管理门禁（已实现、已验收）
+
+需求见[历史管理](../requirements/conversation-history.md)，命令、环境和完整用例见[专项计划](../plans/CONVERSATION_HISTORY_PLAN.md)。本阶段已完成独立测试，未沿用阶段七结果代替历史管理验收。
+
+| 门禁 | 必须验证 |
+|---|---|
+| 单元 | 名称约束、幂等置顶/归档、归档写许可、字面搜索、稳定排序和管理/活动时间分离 |
+| 集成 | 集合/版本范围、分组跨集合拒绝及重名、删组转未分组、管理原子性、归档所有写入口/重试被拒绝、任务竞争保护、单独删除与偏好来源级联、共享材料和其他对话保留、归档集合删除 |
+| 真实浏览器 | 两入口一致、置顶不重复、分组菜单/折叠、重命名/搜索、当前归档及刷新只读/草稿恢复、忙碌提示及取消、删除确认和本地草稿清理、失败输入保留、窄屏与键盘 |
+| 构建 | TypeScript 与 Vite 构建通过，分层约束保持 |
+| 迁移 | 空库及 0006→0007 升级；旧材料版本、消息与快照保持；旧对话默认未归档/未置顶/未分组 |
+| 文档 | 需求、API、链路、架构、计划与 PROCESS 同步最终实现和真实执行证据 |
+
+任务竞争通过不同数据库会话和受控延迟观察，不能用顺序测试代替。所有归档内容写入被拒绝时不增加模型调用；管理操作本身不调用模型。浏览器必须验证归档对话的本地草稿在集合删除后被清理。
+
+新增测试以现有公共领域、HTTP 与浏览器边界逐切片先失败后通过。沿用已确认 Python 环境和隔离测试服务，不安装依赖，不调用真实供应商。单元 50 passed、集成 24 passed、迁移成功、前端构建成功；隔离 Fake LLM 下 API smoke 与真实 Chromium 浏览器均通过。浏览器截图保存在 `C:/Users/wujiahao/AppData/Local/Temp/ask-resume-browser-Wjjs7G/`。所有必需门禁已完成，阶段八可标记为已完成。

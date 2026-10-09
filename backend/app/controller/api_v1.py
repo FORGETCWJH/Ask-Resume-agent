@@ -4,17 +4,60 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..dto.base import ApiModel
-from ..dto.conversation import ConversationCreate, ConversationOut, MessageCreate, MessageOut, QuestionBatchOut, SupplementOut, SupplementUpdate
+from ..dto.conversation import ConversationCreate, ConversationGroupCreate, ConversationGroupOut, ConversationOut, ConversationPatch, MessageCreate, MessageOut, QuestionBatchOut, SupplementOut, SupplementUpdate
 from ..dto.agent_follow_up import LlmRunCreateOut, LlmRunOut, PracticeAnswerCreate, PracticeAnswerOut, PracticeTurnListOut, QuestionScope
 from ..dto.material import EvidenceOut, MaterialSetCreate, MaterialSetOut, MaterialSummary, RecognitionConfirm, RecognitionOut, RecognitionPatch, RecognitionRetry
 from ..service.conversation_service import ConversationService
 from ..service.material_service import MaterialService
 from ..service.resume_recognition_service import ResumeRecognitionService
 from ..service.agent_follow_up_service import AgentFollowUpService
+from ..service.practice_service import PracticeService
+from ..dto.practice import PracticeInputCreate, NavigationCreate, PreferencePatch
 from ..models import LlmRun
 
 
 router = APIRouter(prefix="/api/v1")
+
+
+@router.get("/conversations/{conversation_id}/resume-snapshots")
+def resume_snapshots(conversation_id: str, db: Session = Depends(get_db)) -> dict:
+    return PracticeService(db).snapshots(conversation_id)
+
+
+@router.post("/conversations/{conversation_id}/input-runs", status_code=202)
+def practice_input(conversation_id: str, payload: PracticeInputCreate, db: Session = Depends(get_db)) -> dict:
+    return PracticeService(db).submit(conversation_id, payload.content, payload.client_request_id)
+
+
+@router.get("/conversations/{conversation_id}/practice-state")
+def practice_state(conversation_id: str, db: Session = Depends(get_db)) -> dict:
+    return PracticeService(db).state(conversation_id)
+
+
+@router.get("/conversations/{conversation_id}/practice-messages")
+def practice_messages(conversation_id: str, after_sequence: int = Query(0, ge=0, alias="afterSequence"), limit: int = Query(100, ge=1, le=200), db: Session = Depends(get_db)) -> dict:
+    return PracticeService(db).messages(conversation_id, after_sequence, limit)
+
+
+@router.post("/conversations/{conversation_id}/navigation-events", status_code=201)
+def practice_navigation(conversation_id: str, payload: NavigationCreate, db: Session = Depends(get_db)) -> dict:
+    return PracticeService(db).next_question(conversation_id, payload.client_request_id)
+
+
+@router.get("/practice-preferences")
+def practice_preferences(db: Session = Depends(get_db)) -> list:
+    return PracticeService(db).preferences()
+
+
+@router.patch("/practice-preferences/{preference_id}")
+def patch_practice_preference(preference_id: str, payload: PreferencePatch, db: Session = Depends(get_db)) -> dict:
+    return PracticeService(db).patch_preference(preference_id, payload.value, payload.expected_revision)
+
+
+@router.delete("/practice-preferences/{preference_id}", status_code=204)
+def delete_practice_preference(preference_id: str, db: Session = Depends(get_db)) -> Response:
+    PracticeService(db).delete_preference(preference_id)
+    return Response(status_code=204)
 
 
 class MessageEnvelope(ApiModel):
@@ -105,8 +148,29 @@ def create_conversation(set_id: str, payload: ConversationCreate, db: Session = 
 
 
 @router.get("/material-sets/{set_id}/conversations", response_model=list[ConversationOut])
-def list_conversations(set_id: str, db: Session = Depends(get_db)) -> list[ConversationOut]:
-    return ConversationService(db).list_for_set(set_id)
+def list_conversations(set_id: str, status: str = Query("all"), q: str | None = Query(None), group_id: str | None = Query(None, alias="groupId"), db: Session = Depends(get_db)) -> list[ConversationOut]:
+    return ConversationService(db).list_for_set(set_id, status, q, group_id)
+
+
+@router.get("/material-sets/{set_id}/conversation-groups", response_model=list[ConversationGroupOut])
+def list_conversation_groups(set_id: str, db: Session = Depends(get_db)) -> list[ConversationGroupOut]:
+    return ConversationService(db).groups(set_id)
+
+
+@router.post("/material-sets/{set_id}/conversation-groups", response_model=ConversationGroupOut, status_code=status.HTTP_201_CREATED)
+def create_conversation_group(set_id: str, payload: ConversationGroupCreate, db: Session = Depends(get_db)) -> ConversationGroupOut:
+    return ConversationService(db).create_group(set_id, payload.name)
+
+
+@router.patch("/conversation-groups/{group_id}", response_model=ConversationGroupOut)
+def update_conversation_group(group_id: str, payload: ConversationGroupCreate, db: Session = Depends(get_db)) -> ConversationGroupOut:
+    return ConversationService(db).update_group(group_id, payload.name)
+
+
+@router.delete("/conversation-groups/{group_id}", status_code=204)
+def delete_conversation_group(group_id: str, db: Session = Depends(get_db)) -> Response:
+    ConversationService(db).delete_group(group_id)
+    return Response(status_code=204)
 
 
 @router.post("/material-sets/{set_id}/question-batches", response_model=QuestionBatchOut, status_code=status.HTTP_201_CREATED)
@@ -122,6 +186,17 @@ async def generate_question_batch(set_id: str, db: Session = Depends(get_db)) ->
 def get_conversation(conversation_id: str, db: Session = Depends(get_db)) -> ConversationOut:
     service = ConversationService(db)
     return service.serialize(service.get(conversation_id))
+
+
+@router.patch("/conversations/{conversation_id}", response_model=ConversationOut)
+def update_conversation(conversation_id: str, payload: ConversationPatch, db: Session = Depends(get_db)) -> ConversationOut:
+    return ConversationService(db).update_management(conversation_id, payload)
+
+
+@router.delete("/conversations/{conversation_id}", status_code=204)
+def delete_conversation(conversation_id: str, db: Session = Depends(get_db)) -> Response:
+    ConversationService(db).delete_conversation(conversation_id)
+    return Response(status_code=204)
 
 
 @router.post("/conversations/{conversation_id}/messages", response_model=MessageEnvelope, status_code=status.HTTP_201_CREATED)

@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel
+from pydantic import ValidationError
+from langchain_core.exceptions import OutputParserException
 
 try:
     from langchain_core.messages import HumanMessage, SystemMessage
@@ -91,10 +94,11 @@ class LangChainOpenAIAdapter:
     ) -> T:
         if HumanMessage is None or SystemMessage is None:
             raise LLMError("langchain-core 未安装")
-        prompt = system_prompt or _default_system_prompt(mode, schema)
+        from ..domain.practice_intent import redact_context
+        prompt = (system_prompt or _default_system_prompt(mode, schema)) + "\n必须遵循的 JSON Schema：\n" + json.dumps(schema.model_json_schema(by_alias=True), ensure_ascii=False)
         messages = [
             SystemMessage(content=prompt),
-            HumanMessage(content=f"模式：{mode}\n上下文：\n{context}\n\n当前输入：{user_text}"),
+            HumanMessage(content=redact_context(f"模式：{mode}\n上下文：\n{context}\n\n当前输入：{user_text}")),
         ]
         model = self._build_model()
         try:
@@ -103,6 +107,8 @@ class LangChainOpenAIAdapter:
             result = await runnable.ainvoke(messages)
             return schema.model_validate(result)
         except Exception as exc:
+            if not isinstance(exc, (ValidationError, OutputParserException, json.JSONDecodeError)):
+                raise LLMError(f"模型请求失败：{exc}") from exc
             # 一次修复请求只处理结构化失败；网络/供应商错误交给任务层显式重试。
             try:
                 raw = await model.ainvoke(messages + [HumanMessage(content="请仅返回符合要求的 JSON 对象，不要输出 Markdown。")])
@@ -124,8 +130,30 @@ class FakeLLMClient:
         schema: type[T],
         system_prompt: str | None = None,
     ) -> T:
+        from ..domain.practice_intent import PracticeIntent
+        if schema is PracticeIntent:
+            # 仅无凭据演示/自动化测试使用；真实环境始终走模型节点。
+            payload = {"action": "answer", "answer": user_text}
+            if "以后" in user_text or "本轮" in user_text:
+                payload = {"action": "preference", "preferences": [{"key": "count", "value": 1, "scope": "longTerm" if "以后" in user_text else "round", "explicit": True, "instructionQuote": user_text}]}
+            elif "生成" in user_text or "新一组" in user_text:
+                match = re.search(r"(\d+)\s*(?:个|道)", user_text)
+                payload = {"action": "regenerate" if "新一组" in user_text else "generate", "scope": {"count": int(match.group(1)) if match else 5, "topic": user_text}, "scopeOverrides": ["topic"] + (["count"] if match else [])}
+            elif "下一题" in user_text:
+                payload = {"action": "nextQuestion"}
+            elif "追问" in user_text or "深入一点" in user_text:
+                payload = {"action": "followUp"}
+            elif "参考答案" in user_text:
+                payload = {"action": "referenceAnswer"}
+            elif "点评" in user_text or "反馈" in user_text:
+                payload = {"action": "feedback", "answer": user_text.split("，请点评")[0] if "，请点评" in user_text else None}
+            elif user_text == "换成消息队列":
+                payload = {"outcome": "needsClarification", "clarification": "你希望换一组消息队列问题，还是继续追问当前题？"}
+            return schema.model_validate(payload)
         if schema is QuestionGenerationResponse:
-            return schema.model_validate({"questions": [{"text": "请解释你在该经历中亲自负责的核心部分。", "type": "implementation", "evidenceIds": []}]})
+            match = re.search(r'"count"\s*:\s*(\d+)', context)
+            count = min(int(match.group(1)), 20) if match else 1
+            return schema.model_validate({"questions": [{"text": f"请解释你在该经历中亲自负责的核心部分（第 {index + 1} 题）。", "type": "implementation", "evidenceIds": []} for index in range(count)]})
         if schema is FeedbackResponse:
             return schema.model_validate({"summary": "回答已记录，请继续补充实现细节。", "strengths": ["回答聚焦当前问题"], "missingPoints": ["还缺少失败场景"], "nextPracticeStep": "补充一个具体排查过程。"})
         if schema is ReferenceAnswerResponse:

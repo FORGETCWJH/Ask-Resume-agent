@@ -15,7 +15,5 @@ if (!app.includes("evidence-pane")) throw new Error("fixed evidence pane is miss
 if (!panel.includes("recognition-nav") || !panel.includes("删除记录")) throw new Error("structured recognition navigation/actions are missing");
 if (!panel.includes("完整技能描述") || !panel.includes("经历描述") || !panel.includes("项目描述")) throw new Error("compact description fields are missing");
 if (panel.includes("skill-tags") || panel.includes("nested-project") || panel.includes("成果指标") || panel.includes("metrics")) throw new Error("legacy split recognition fields are still rendered");
-const practice = await readFile(new URL("../../src/features/practice/PracticePanel.tsx", import.meta.url), "utf8");
-if (!practice.includes("question-runs") || !practice.includes("保存回答") || !practice.includes("reference-answer-runs")) throw new Error("practice async actions are missing");
-if (!practice.includes("长链路不会阻塞当前页面")) throw new Error("practice async status copy is missing");
+// 练习交互由 conversation-browser.mjs 在真实浏览器验证，不断言旧表单源码。
 console.log("ocr ui contract passed");
